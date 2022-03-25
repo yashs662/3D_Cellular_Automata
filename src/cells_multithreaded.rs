@@ -390,6 +390,10 @@ fn tick_cell(
         utils::clear_states(&mut cells.states.write().unwrap());
         cells.ready();
     }
+    if keyboard_input.just_pressed(KeyCode::P) {
+        println!("noise");
+        utils::spawn_noise(&mut cells.states.write().unwrap(), &rule);
+    }
     if keyboard_input.just_pressed(KeyCode::Key1) {
         println!("unform cube size 1");
         utils::spawn_uniform_cube(&mut cells.states.write().unwrap(), &rule, 1);

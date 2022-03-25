@@ -10,7 +10,6 @@ use crate::{rule::Rule, CellState};
 
 // warp coordinates outside of bounds
 pub fn keep_in_bounds(bounds: i32, pos: &mut IVec3) {
-    //pos.x >= -bounds && pos.y >= -bounds && pos.z >= -bounds && pos.x <= bounds && pos.y <= bounds && pos.z <= bounds
     if pos.x <= -bounds {
         pos.x = bounds - 1;
     } else if pos.x >= bounds {

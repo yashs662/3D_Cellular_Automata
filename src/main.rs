@@ -1,4 +1,4 @@
-// #![windows_subsystem = "windows"]
+#![windows_subsystem = "windows"]
 
 use bevy::{
     prelude::*,
@@ -17,14 +17,12 @@ use cell_event::CellStatesChangedEvent;
 pub mod cell_event;
 mod cell_renderer;
 mod cells_multithreaded;
-mod cells_single_threaded;
 mod neighbours;
 mod rotating_camera;
 mod rule;
 mod utils;
 use cell_renderer::*;
 use cells_multithreaded::*;
-// use cells_single_threaded::*;
 use neighbours::NeighbourMethod;
 use rotating_camera::{RotatingCamera, RotatingCameraPlugin};
 use rule::*;
@@ -59,39 +57,25 @@ fn main() {
         // states: 10,
         // color_method: ColorMethod::StateLerp(Color::RED, Color::YELLOW),
         // neighbour_method: NeighbourMethod::Moore,
-        
-        // VN pyramid
-        // survival_rule: Value::Range(0..=6),
-        // birth_rule: Value::Singles(vec![1,3]),
-        // states: 2,
-        // color_method: ColorMethod::DistToCenter(Color::BLUE, Color::GREEN),
-        // neighbour_method: NeighbourMethod::VonNeuman,
-
-        // expand then die
-        //survival_rule: Value::Single(4),
-        //birth_rule: Value::Single(3),
-        //states: 20,
-        //color_method: ColorMethod::StateLerp(Color::RED, Color::BLACK),
-        //neighbour_method: NeighbourMethod::Moore,
-
-        // no idea what to call this
-        survival_rule: Value::Singles(vec![6,7]),
-        birth_rule: Value::Singles(vec![4,6,9,10,11]),
-        states: 6,
-        color_method: ColorMethod::StateLerp(Color::ORANGE_RED, Color::BLACK),
-        neighbour_method: NeighbourMethod::Moore,
-
-        // LARGE LINES
-        // survival_rule: Value::Singles(vec![6]),
-        // birth_rule: Value::Singles(vec![4, 6, 9, 10, 11, 16, 17, 18, 19, 20, 21, 22, 23, 24]),
-        // states: 35,
-        // color_method: ColorMethod::StateLerp(Color::CYAN, Color::BLACK),
+    
+        // glider
+        // survival_rule: Value::Singles(vec![6,7]),
+        // birth_rule: Value::Singles(vec![4,6,9,10,11]),
+        // states: 6,
+        // color_method: ColorMethod::StateLerp(Color::ORANGE_RED, Color::BLACK),
         // neighbour_method: NeighbourMethod::Moore,
+
+        // lines
+        survival_rule: Value::Singles(vec![6]),
+        birth_rule: Value::Singles(vec![4, 6, 9, 10, 11, 16, 17, 18, 19, 20, 21, 22, 23, 24]),
+        states: 35,
+        color_method: ColorMethod::StateLerp(Color::CYAN, Color::BLACK),
+        neighbour_method: NeighbourMethod::Moore,
     };
     let mut task_pool_settings = DefaultTaskPoolOptions::default();
     task_pool_settings.async_compute.percent = 1.0f32;
-    task_pool_settings.compute.percent = 1.0f32; // i currently only use async_compute
-    task_pool_settings.io.percent = 1.0f32; // always use 1
+    task_pool_settings.compute.percent = 1.0f32;
+    task_pool_settings.io.percent = 10.0f32;
     App::new()
         .insert_resource(Msaa { samples: 4 })
         .insert_resource(WindowDescriptor {
@@ -112,15 +96,14 @@ fn main() {
         .add_plugin(RotatingCameraPlugin)
         .add_plugin(CellMaterialPlugin)
         .insert_resource(rule)
-        // you can swap out the different implementations
         .add_plugin(CellsMultithreadedPlugin)
-        // .add_plugin(CellsSinglethreadedPlugin)
         .add_startup_system(setup)
         .run();
 }
 
 fn setup(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, asset_server: Res<AssetServer>) {
 
+    // for fps counter
     commands.spawn_bundle(UiCameraBundle::default());
 
     commands.spawn().insert_bundle((
@@ -139,13 +122,6 @@ fn setup(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, asset_server:
         ),
         Visibility::default(),
         ComputedVisibility::default(),
-        // NOTE: Frustum culling is done based on the Aabb of the Mesh and the GlobalTransform.
-        // As the cube is at the origin, if its Aabb moves outside the view frustum, all the
-        // instanced cubes will be culled.
-        // The InstanceMaterialData contains the 'GlobalTransform' information for this custom
-        // instancing, and that is not taken into account with the built-in frustum culling.
-        // We must disable the built-in frustum culling by adding the `NoFrustumCulling` marker
-        // component to avoid incorrect culling.
         NoFrustumCulling,
     ));
 

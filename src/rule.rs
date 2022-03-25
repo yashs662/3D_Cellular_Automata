@@ -58,18 +58,3 @@ pub struct Rule {
     pub bounding_size: i32,
     pub color_method: ColorMethod,
 }
-
-impl Rule {
-    pub(crate) fn get_bounding_ranges(
-        &self,
-    ) -> (
-        RangeInclusive<i32>,
-        RangeInclusive<i32>,
-        RangeInclusive<i32>,
-    ) {
-        let x_range = -self.bounding_size..=self.bounding_size;
-        let y_range = -self.bounding_size..=self.bounding_size;
-        let z_range = -self.bounding_size..=self.bounding_size;
-        (x_range, y_range, z_range)
-    }
-}
