@@ -52,11 +52,11 @@ fn main() {
         bounding_size: 40,
 
         // builder
-        // survival_rule: Value::Singles(vec![2, 6, 9]),
-        // birth_rule: Value::Singles(vec![4, 6, 8, 9, 10]),
-        // states: 10,
-        // color_method: ColorMethod::StateLerp(Color::RED, Color::YELLOW),
-        // neighbour_method: NeighbourMethod::Moore,
+        survival_rule: Value::Singles(vec![2, 6, 9]),
+        birth_rule: Value::Singles(vec![4, 6, 8, 9, 10]),
+        states: 10,
+        color_method: ColorMethod::StateLerp(Color::RED, Color::YELLOW),
+        neighbour_method: NeighbourMethod::Moore,
     
         // glider
         // survival_rule: Value::Singles(vec![6,7]),
@@ -66,11 +66,11 @@ fn main() {
         // neighbour_method: NeighbourMethod::Moore,
 
         // lines
-        survival_rule: Value::Singles(vec![6]),
-        birth_rule: Value::Singles(vec![4, 6, 9, 10, 11, 16, 17, 18, 19, 20, 21, 22, 23, 24]),
-        states: 35,
-        color_method: ColorMethod::StateLerp(Color::CYAN, Color::BLACK),
-        neighbour_method: NeighbourMethod::Moore,
+        // survival_rule: Value::Singles(vec![6]),
+        // birth_rule: Value::Singles(vec![4, 6, 9, 10, 11, 16, 17, 18, 19, 20, 21, 22, 23, 24]),
+        // states: 35,
+        // color_method: ColorMethod::StateLerp(Color::CYAN, Color::BLACK),
+        // neighbour_method: NeighbourMethod::Moore,
     };
     let mut task_pool_settings = DefaultTaskPoolOptions::default();
     task_pool_settings.async_compute.percent = 1.0f32;
