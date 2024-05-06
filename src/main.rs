@@ -6,10 +6,10 @@ use cellular_automata_3d::{
 };
 use cgmath::Rotation3;
 use std::{borrow::Cow, f32::consts, mem};
-use wgpu::util::DeviceExt;
+use wgpu::{util::DeviceExt, PipelineCompilationOptions};
 use winit::{
     event::{DeviceEvent, ElementState, KeyEvent, MouseButton, WindowEvent},
-    keyboard::Key,
+    keyboard::{Key, NamedKey},
 };
 
 pub struct Settings {
@@ -43,6 +43,22 @@ impl Settings {
     pub fn toggle_wireframe_overlay(&mut self) {
         self.wireframe_overlay = !self.wireframe_overlay;
         log::info!("Wireframe overlay set to: {}", self.wireframe_overlay);
+    }
+
+    pub fn set_num_instances_per_row(&mut self, num_instances_per_row: u32) {
+        if num_instances_per_row < 1 {
+            log::error!("Number of instances per row cannot be less than 1");
+            self.num_instances_per_row = 1;
+        } else if num_instances_per_row > 100 {
+            log::error!("Number of instances per row cannot be more than 100");
+            self.num_instances_per_row = 100;
+        } else {
+            self.num_instances_per_row = num_instances_per_row;
+        }
+        log::info!(
+            "Number of instances per row set to: {}",
+            self.num_instances_per_row
+        );
     }
 }
 
@@ -280,41 +296,7 @@ impl cellular_automata_3d::framework::App for App {
             usage: wgpu::BufferUsages::INDEX,
         });
 
-        let instances = (0..settings.num_instances_per_row)
-            .flat_map(|z| {
-                (0..settings.num_instances_per_row).flat_map(move |y| {
-                    (0..settings.num_instances_per_row).map(move |x| {
-                        let x = settings.space_between_instances
-                            * (x as f32 - settings.num_instances_per_row as f32 / 2.0);
-                        let y = settings.space_between_instances
-                            * (y as f32 - settings.num_instances_per_row as f32 / 2.0);
-                        let z = settings.space_between_instances
-                            * (z as f32 - settings.num_instances_per_row as f32 / 2.0);
-
-                        let position = cgmath::Vector3 { x, y, z };
-
-                        let rotation = cgmath::Quaternion::from_axis_angle(
-                            cgmath::Vector3::unit_z(),
-                            cgmath::Deg(0.0),
-                        );
-
-                        // random color
-                        let color = cgmath::Vector4 {
-                            x: rand::random::<f32>(),
-                            y: rand::random::<f32>(),
-                            z: rand::random::<f32>(),
-                            w: 5.0,
-                        };
-
-                        Instance {
-                            position,
-                            rotation,
-                            color,
-                        }
-                    })
-                })
-            })
-            .collect::<Vec<_>>();
+        let instances = prepare_instances(&settings);
 
         let instance_data = instances.iter().map(Instance::to_raw).collect::<Vec<_>>();
         let instance_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -461,6 +443,7 @@ impl cellular_automata_3d::framework::App for App {
                 module: &shader,
                 entry_point: "vs_main",
                 buffers: vertex_buffers,
+                compilation_options: PipelineCompilationOptions::default()
             },
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
@@ -468,17 +451,22 @@ impl cellular_automata_3d::framework::App for App {
                 targets: &[Some(wgpu::ColorTargetState {
                     format: config.format,
                     blend: Some(wgpu::BlendState {
-                        color: wgpu::BlendComponent::REPLACE,
+                        color: wgpu::BlendComponent {
+                            src_factor: wgpu::BlendFactor::SrcAlpha,
+                            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                            operation: wgpu::BlendOperation::Add,
+                        },
                         alpha: wgpu::BlendComponent::REPLACE,
                     }),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
+                compilation_options: PipelineCompilationOptions::default()
             }),
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList,
                 strip_index_format: None,
                 front_face: wgpu::FrontFace::Ccw,
-                cull_mode: Some(wgpu::Face::Back),
+                cull_mode: None,
                 // Setting this to anything other than Fill requires Features::POLYGON_MODE_LINE
                 // or Features::POLYGON_MODE_POINT
                 polygon_mode: wgpu::PolygonMode::Fill,
@@ -515,6 +503,7 @@ impl cellular_automata_3d::framework::App for App {
                     module: &shader,
                     entry_point: "vs_main",
                     buffers: vertex_buffers,
+                    compilation_options: PipelineCompilationOptions::default()
                 },
                 fragment: Some(wgpu::FragmentState {
                     module: &shader,
@@ -531,6 +520,7 @@ impl cellular_automata_3d::framework::App for App {
                         }),
                         write_mask: wgpu::ColorWrites::ALL,
                     })],
+                    compilation_options: PipelineCompilationOptions::default()
                 }),
                 primitive: wgpu::PrimitiveState {
                     front_face: wgpu::FrontFace::Ccw,
@@ -592,6 +582,15 @@ impl cellular_automata_3d::framework::App for App {
                         if s.as_str() == "p" {
                             self.settings.toggle_wireframe_overlay();
                         }
+                    } else if let Key::Named(key) = logical_key {
+                        if key == NamedKey::PageUp {
+                            self.settings
+                                .set_num_instances_per_row(self.settings.num_instances_per_row + 1);
+                        } else if key == NamedKey::PageDown {
+                            self.settings.set_num_instances_per_row(
+                                self.settings.num_instances_per_row.saturating_sub(1),
+                            );
+                        }
                     }
                 }
             }
@@ -617,7 +616,7 @@ impl cellular_automata_3d::framework::App for App {
         }
     }
 
-    fn update(&mut self, dt: f32, queue: &wgpu::Queue) {
+    fn update(&mut self, dt: f32, queue: &wgpu::Queue, device: &wgpu::Device) {
         self.camera_controller.update_camera(&mut self.camera, dt);
         self.camera_uniform
             .update_view_proj(&self.camera, &self.projection);
@@ -626,6 +625,16 @@ impl cellular_automata_3d::framework::App for App {
             0,
             bytemuck::cast_slice(&[self.camera_uniform]),
         );
+        if self.instances.len() != (self.settings.num_instances_per_row as usize).pow(3) {
+            let instances = prepare_instances(&self.settings);
+            let instance_data = instances.iter().map(Instance::to_raw).collect::<Vec<_>>();
+            self.instance_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Instance Buffer"),
+                contents: bytemuck::cast_slice(&instance_data),
+                usage: wgpu::BufferUsages::VERTEX,
+            });
+            self.instances = instances;
+        }
     }
 
     fn resize(
@@ -687,6 +696,45 @@ impl cellular_automata_3d::framework::App for App {
 
         queue.submit(Some(encoder.finish()));
     }
+}
+
+fn prepare_instances(settings: &Settings) -> Vec<Instance> {
+    let instances = (0..settings.num_instances_per_row)
+        .flat_map(|z| {
+            (0..settings.num_instances_per_row).flat_map(move |y| {
+                (0..settings.num_instances_per_row).map(move |x| {
+                    let x = settings.space_between_instances
+                        * (x as f32 - settings.num_instances_per_row as f32 / 2.0);
+                    let y = settings.space_between_instances
+                        * (y as f32 - settings.num_instances_per_row as f32 / 2.0);
+                    let z = settings.space_between_instances
+                        * (z as f32 - settings.num_instances_per_row as f32 / 2.0);
+
+                    let position = cgmath::Vector3 { x, y, z };
+
+                    let rotation = cgmath::Quaternion::from_axis_angle(
+                        cgmath::Vector3::unit_z(),
+                        cgmath::Deg(0.0),
+                    );
+
+                    // random color
+                    let color = cgmath::Vector4 {
+                        x: rand::random::<f32>(),
+                        y: rand::random::<f32>(),
+                        z: rand::random::<f32>(),
+                        w: 0.2,
+                    };
+
+                    Instance {
+                        position,
+                        rotation,
+                        color,
+                    }
+                })
+            })
+        })
+        .collect::<Vec<_>>();
+    instances
 }
 
 pub fn main() {

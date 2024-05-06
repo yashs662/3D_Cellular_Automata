@@ -45,7 +45,7 @@ pub trait App: 'static + Sized {
         queue: &wgpu::Queue,
     );
 
-    fn update(&mut self, dt: f32, queue: &wgpu::Queue);
+    fn update(&mut self, dt: f32, queue: &wgpu::Queue, device: &wgpu::Device);
 
     fn update_window_event(&mut self, event: WindowEvent);
 
@@ -181,6 +181,22 @@ impl SurfaceWrapper {
 
     fn config(&self) -> &wgpu::SurfaceConfiguration {
         self.config.as_ref().unwrap()
+    }
+
+    fn toggle_vsync(&mut self, context: &AppContext) {
+        let config = self.config.as_mut().unwrap();
+        config.present_mode = match config.present_mode {
+            wgpu::PresentMode::Fifo => wgpu::PresentMode::Immediate,
+            wgpu::PresentMode::Immediate => wgpu::PresentMode::Fifo,
+            _ => wgpu::PresentMode::Fifo,
+        };
+        if config.present_mode == wgpu::PresentMode::Fifo {
+            log::info!("VSync enabled");
+        } else {
+            log::info!("VSync disabled");
+        }
+        let surface = self.surface.as_ref().unwrap();
+        surface.configure(&context.device, config);
     }
 }
 
@@ -361,11 +377,16 @@ async fn start<E: App>(title: &str) {
                         event:
                             KeyEvent {
                                 logical_key: Key::Character(s),
+                                state: winit::event::ElementState::Pressed,
                                 ..
                             },
                         ..
-                    } if s == "r" => {
-                        println!("{:#?}", context.instance.generate_report());
+                    } if s == "r" || s == "v" => {
+                        if s == "r" {
+                            println!("{:#?}", context.instance.generate_report());
+                        } else if s == "v" {
+                            surface.toggle_vsync(&context);
+                        }
                     }
                     WindowEvent::RedrawRequested => {
                         // On MacOS, currently redraw requested comes in _before_ Init does.
@@ -377,7 +398,7 @@ async fn start<E: App>(title: &str) {
                         }
 
                         frame_counter.update();
-                        app.as_mut().unwrap().update(frame_counter.get_frame_time(), &context.queue);
+                        app.as_mut().unwrap().update(frame_counter.get_frame_time(), &context.queue, &context.device);
                         let frame = surface.acquire(&context);
                         let view = frame.texture.create_view(&wgpu::TextureViewDescriptor {
                             format: Some(surface.config().view_formats[0]),
