@@ -21,6 +21,7 @@ pub struct Settings {
     transparency: f32,
     num_instances_step_size: u32,
     transparency_step_size: f32,
+    space_between_step_size: f32,
     instance_update_required: bool,
     angle_threshold_for_sort: f32,
 }
@@ -46,6 +47,7 @@ impl Settings {
             transparency: 0.2,
             num_instances_step_size: 1,
             transparency_step_size: 0.1,
+            space_between_step_size: 0.05,
             instance_update_required: false,
             angle_threshold_for_sort: 0.25,
         }
@@ -84,6 +86,23 @@ impl Settings {
             self.transparency = (transparency * 10.0).round() / 10.0;
         }
         log::info!("Transparency set to: {}", self.transparency);
+        self.instance_update_required = true;
+    }
+
+    pub fn set_space_between_instances(&mut self, space_between_instances: f32) {
+        if space_between_instances < (self.cube_size * 2.0) {
+            log::error!("Space between instances cannot be less than 0.0");
+            self.space_between_instances = self.cube_size * 2.0;
+        } else if space_between_instances > ((self.cube_size * 2.0) + 10.0) {
+            log::error!("Space between instances cannot be more than 10.0");
+            self.space_between_instances = (self.cube_size * 2.0) + 10.0;
+        } else {
+            self.space_between_instances = (space_between_instances * 100.0).round() / 100.0;
+        }
+        log::info!(
+            "Space between instances set to: {}",
+            ((self.space_between_instances - (self.cube_size * 2.0)) * 100.0).round() / 100.0
+        );
         self.instance_update_required = true;
     }
 }
@@ -627,6 +646,16 @@ impl cellular_automata_3d::framework::App for App {
                             self.settings.set_transparency(
                                 self.settings.transparency + self.settings.transparency_step_size,
                             );
+                        } else if s.as_str() == "k" {
+                            self.settings.set_space_between_instances(
+                                self.settings.space_between_instances
+                                    - self.settings.space_between_step_size,
+                            );
+                        } else if s.as_str() == "l" {
+                            self.settings.set_space_between_instances(
+                                self.settings.space_between_instances
+                                    + self.settings.space_between_step_size,
+                            );
                         }
                     } else if let Key::Named(key) = logical_key {
                         if key == NamedKey::PageUp {
@@ -675,19 +704,22 @@ impl cellular_automata_3d::framework::App for App {
             0,
             bytemuck::cast_slice(&[self.camera_uniform]),
         );
+        let yaw_diff = (self.camera.yaw - self.last_sort_camera.yaw).0.abs();
+        let pitch_diff = (self.camera.pitch - self.last_sort_camera.pitch).0.abs();
+        if (yaw_diff > self.settings.angle_threshold_for_sort
+            || pitch_diff > self.settings.angle_threshold_for_sort)
+            && self.settings.transparency < 1.0
+        {
+            self.sort_instances_by_distance_to_camera();
+            self.last_sort_camera = self.camera;
+            self.settings.instance_update_required = true;
+        }
         if self.settings.instance_update_required {
-            if (self.instances.len() != (self.settings.num_instances_per_row as usize).pow(3))
-                || self
-                    .instances
-                    .iter()
-                    .any(|i| i.color.w != self.settings.transparency)
-            {
-                // recalculate instance positions
-                self.instances = prepare_instances(&self.settings);
-                if self.settings.transparency < 1.0 {
-                    self.sort_instances_by_distance_to_camera();
-                    self.last_sort_camera = self.camera;
-                }
+            // recalculate instance positions
+            self.instances = prepare_instances(&self.settings);
+            if self.settings.transparency < 1.0 {
+                self.sort_instances_by_distance_to_camera();
+                self.last_sort_camera = self.camera;
             }
             // update instance buffer
             let instance_data = self
@@ -701,15 +733,6 @@ impl cellular_automata_3d::framework::App for App {
                 usage: wgpu::BufferUsages::VERTEX,
             });
             self.settings.instance_update_required = false;
-        }
-        let yaw_diff = (self.camera.yaw - self.last_sort_camera.yaw).0.abs();
-        let pitch_diff = (self.camera.pitch - self.last_sort_camera.pitch).0.abs();
-        if (yaw_diff > self.settings.angle_threshold_for_sort || pitch_diff > self.settings.angle_threshold_for_sort)
-            && self.settings.transparency < 1.0
-        {
-            self.sort_instances_by_distance_to_camera();
-            self.last_sort_camera = self.camera;
-            self.settings.instance_update_required = true;
         }
     }
 
