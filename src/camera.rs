@@ -8,11 +8,11 @@ use winit::{
 
 use crate::constants::{OPENGL_TO_WGPU_MATRIX, SAFE_FRAC_PI_2};
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub struct Camera {
     pub position: Point3<f32>,
-    yaw: Rad<f32>,
-    pitch: Rad<f32>,
+    pub yaw: Rad<f32>,
+    pub pitch: Rad<f32>,
 }
 
 impl Camera {

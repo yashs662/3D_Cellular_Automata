@@ -5,6 +5,7 @@ use cellular_automata_3d::{
     texture::{self, Texture},
 };
 use cgmath::{EuclideanSpace, InnerSpace, Rotation3};
+use rayon::prelude::*;
 use std::{borrow::Cow, f32::consts, mem};
 use wgpu::{util::DeviceExt, PipelineCompilationOptions};
 use winit::{
@@ -21,6 +22,7 @@ pub struct Settings {
     num_instances_step_size: u32,
     transparency_step_size: f32,
     instance_update_required: bool,
+    angle_threshold_for_sort: f32,
 }
 
 impl Default for Settings {
@@ -45,6 +47,7 @@ impl Settings {
             num_instances_step_size: 1,
             transparency_step_size: 0.1,
             instance_update_required: false,
+            angle_threshold_for_sort: 0.25,
         }
     }
 
@@ -270,6 +273,7 @@ struct App {
     instance_buffer: wgpu::Buffer,
     num_indices: u32,
     camera: Camera,
+    last_sort_camera: Camera,
     projection: Projection,
     camera_controller: CameraController,
     camera_uniform: CameraUniform,
@@ -291,11 +295,14 @@ impl App {
         projection * view
     }
     fn sort_instances_by_distance_to_camera(&mut self) {
-        self.instances.sort_by(|a, b| {
-            let a_dist = (a.position - self.camera.position.to_vec()).magnitude();
-            let b_dist = (b.position - self.camera.position.to_vec()).magnitude();
+        let start = std::time::Instant::now();
+        let camera_position = self.camera.position.to_vec();
+        self.instances.par_sort_by(|a, b| {
+            let a_dist = (a.position - camera_position).magnitude();
+            let b_dist = (b.position - camera_position).magnitude();
             b_dist.partial_cmp(&a_dist).unwrap()
         });
+        log::debug!("Time to sort instances: {:?}", start.elapsed());
     }
 }
 
@@ -586,6 +593,7 @@ impl cellular_automata_3d::framework::App for App {
             instance_buffer,
             num_indices: index_data.len() as u32,
             camera,
+            last_sort_camera: camera,
             projection,
             camera_controller,
             camera_uniform,
@@ -659,7 +667,6 @@ impl cellular_automata_3d::framework::App for App {
     }
 
     fn update(&mut self, dt: f32, queue: &wgpu::Queue, device: &wgpu::Device) {
-        let prev_position = self.camera.position;
         self.camera_controller.update_camera(&mut self.camera, dt);
         self.camera_uniform
             .update_view_proj(&self.camera, &self.projection);
@@ -668,9 +675,7 @@ impl cellular_automata_3d::framework::App for App {
             0,
             bytemuck::cast_slice(&[self.camera_uniform]),
         );
-        if ((prev_position != self.camera.position) && self.settings.transparency < 1.0)
-            || self.settings.instance_update_required
-        {
+        if self.settings.instance_update_required {
             if (self.instances.len() != (self.settings.num_instances_per_row as usize).pow(3))
                 || self
                     .instances
@@ -679,9 +684,11 @@ impl cellular_automata_3d::framework::App for App {
             {
                 // recalculate instance positions
                 self.instances = prepare_instances(&self.settings);
+                if self.settings.transparency < 1.0 {
+                    self.sort_instances_by_distance_to_camera();
+                    self.last_sort_camera = self.camera;
+                }
             }
-            // sort instances by distance to camera for correct alpha blending
-            self.sort_instances_by_distance_to_camera();
             // update instance buffer
             let instance_data = self
                 .instances
@@ -694,6 +701,15 @@ impl cellular_automata_3d::framework::App for App {
                 usage: wgpu::BufferUsages::VERTEX,
             });
             self.settings.instance_update_required = false;
+        }
+        let yaw_diff = (self.camera.yaw - self.last_sort_camera.yaw).0.abs();
+        let pitch_diff = (self.camera.pitch - self.last_sort_camera.pitch).0.abs();
+        if (yaw_diff > self.settings.angle_threshold_for_sort || pitch_diff > self.settings.angle_threshold_for_sort)
+            && self.settings.transparency < 1.0
+        {
+            self.sort_instances_by_distance_to_camera();
+            self.last_sort_camera = self.camera;
+            self.settings.instance_update_required = true;
         }
     }
 
@@ -808,7 +824,7 @@ fn prepare_instances(settings: &Settings) -> Vec<Instance> {
             })
         })
         .collect::<Vec<_>>();
-    log::info!("Time to prepare instances: {:?}", start.elapsed());
+    log::debug!("Time to prepare instances: {:?}", start.elapsed());
     instances
 }
 
