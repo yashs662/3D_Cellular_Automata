@@ -4,7 +4,7 @@ use cellular_automata_3d::{
     constants::DEPTH_FORMAT,
     texture::{self, Texture},
 };
-use cgmath::Rotation3;
+use cgmath::{EuclideanSpace, InnerSpace, Rotation3};
 use std::{borrow::Cow, f32::consts, mem};
 use wgpu::{util::DeviceExt, PipelineCompilationOptions};
 use winit::{
@@ -443,7 +443,7 @@ impl cellular_automata_3d::framework::App for App {
                 module: &shader,
                 entry_point: "vs_main",
                 buffers: vertex_buffers,
-                compilation_options: PipelineCompilationOptions::default()
+                compilation_options: PipelineCompilationOptions::default(),
             },
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
@@ -460,7 +460,7 @@ impl cellular_automata_3d::framework::App for App {
                     }),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
-                compilation_options: PipelineCompilationOptions::default()
+                compilation_options: PipelineCompilationOptions::default(),
             }),
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList,
@@ -503,7 +503,7 @@ impl cellular_automata_3d::framework::App for App {
                     module: &shader,
                     entry_point: "vs_main",
                     buffers: vertex_buffers,
-                    compilation_options: PipelineCompilationOptions::default()
+                    compilation_options: PipelineCompilationOptions::default(),
                 },
                 fragment: Some(wgpu::FragmentState {
                     module: &shader,
@@ -520,7 +520,7 @@ impl cellular_automata_3d::framework::App for App {
                         }),
                         write_mask: wgpu::ColorWrites::ALL,
                     })],
-                    compilation_options: PipelineCompilationOptions::default()
+                    compilation_options: PipelineCompilationOptions::default(),
                 }),
                 primitive: wgpu::PrimitiveState {
                     front_face: wgpu::FrontFace::Ccw,
@@ -617,6 +617,7 @@ impl cellular_automata_3d::framework::App for App {
     }
 
     fn update(&mut self, dt: f32, queue: &wgpu::Queue, device: &wgpu::Device) {
+        let prev_position = self.camera.position;
         self.camera_controller.update_camera(&mut self.camera, dt);
         self.camera_uniform
             .update_view_proj(&self.camera, &self.projection);
@@ -625,6 +626,25 @@ impl cellular_automata_3d::framework::App for App {
             0,
             bytemuck::cast_slice(&[self.camera_uniform]),
         );
+        if prev_position != self.camera.position {
+            // sort instances by distance to camera for correct alpha blending
+            self.instances.sort_by(|a, b| {
+                let a_dist = (a.position - self.camera.position.to_vec()).magnitude();
+                let b_dist = (b.position - self.camera.position.to_vec()).magnitude();
+                b_dist.partial_cmp(&a_dist).unwrap()
+            });
+            // update instance buffer
+            let instance_data = self
+                .instances
+                .iter()
+                .map(Instance::to_raw)
+                .collect::<Vec<_>>();
+            self.instance_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Instance Buffer"),
+                contents: bytemuck::cast_slice(&instance_data),
+                usage: wgpu::BufferUsages::VERTEX,
+            });
+        }
         if self.instances.len() != (self.settings.num_instances_per_row as usize).pow(3) {
             let instances = prepare_instances(&self.settings);
             let instance_data = instances.iter().map(Instance::to_raw).collect::<Vec<_>>();
@@ -718,10 +738,23 @@ fn prepare_instances(settings: &Settings) -> Vec<Instance> {
                     );
 
                     // random color
+                    // let color = cgmath::Vector4 {
+                    //     x: rand::random::<f32>(),
+                    //     y: rand::random::<f32>(),
+                    //     z: rand::random::<f32>(),
+                    //     w: 0.2,
+                    // };
+                    // give a color based on position
                     let color = cgmath::Vector4 {
-                        x: rand::random::<f32>(),
-                        y: rand::random::<f32>(),
-                        z: rand::random::<f32>(),
+                        x: (x + settings.space_between_instances)
+                            / (settings.space_between_instances
+                                * settings.num_instances_per_row as f32),
+                        y: (y + settings.space_between_instances)
+                            / (settings.space_between_instances
+                                * settings.num_instances_per_row as f32),
+                        z: (z + settings.space_between_instances)
+                            / (settings.space_between_instances
+                                * settings.num_instances_per_row as f32),
                         w: 0.2,
                     };
 
