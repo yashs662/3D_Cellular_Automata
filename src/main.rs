@@ -17,6 +17,10 @@ pub struct Settings {
     num_instances_per_row: u32,
     cube_size: f32,
     space_between_instances: f32,
+    transparency: f32,
+    num_instances_step_size: u32,
+    transparency_step_size: f32,
+    instance_update_required: bool,
 }
 
 impl Default for Settings {
@@ -37,6 +41,10 @@ impl Settings {
             num_instances_per_row,
             cube_size,
             space_between_instances,
+            transparency: 0.2,
+            num_instances_step_size: 1,
+            transparency_step_size: 0.1,
+            instance_update_required: false,
         }
     }
 
@@ -59,6 +67,21 @@ impl Settings {
             "Number of instances per row set to: {}",
             self.num_instances_per_row
         );
+        self.instance_update_required = true;
+    }
+
+    pub fn set_transparency(&mut self, transparency: f32) {
+        if transparency < 0.0 {
+            log::error!("Transparency cannot be less than 0.0");
+            self.transparency = 0.0;
+        } else if transparency > 1.0 {
+            log::error!("Transparency cannot be more than 1.0");
+            self.transparency = 1.0;
+        } else {
+            self.transparency = (transparency * 10.0).round() / 10.0;
+        }
+        log::info!("Transparency set to: {}", self.transparency);
+        self.instance_update_required = true;
     }
 }
 
@@ -266,6 +289,13 @@ impl App {
             glam::Vec3::Z,
         );
         projection * view
+    }
+    fn sort_instances_by_distance_to_camera(&mut self) {
+        self.instances.sort_by(|a, b| {
+            let a_dist = (a.position - self.camera.position.to_vec()).magnitude();
+            let b_dist = (b.position - self.camera.position.to_vec()).magnitude();
+            b_dist.partial_cmp(&a_dist).unwrap()
+        });
     }
 }
 
@@ -581,14 +611,26 @@ impl cellular_automata_3d::framework::App for App {
                     if let Key::Character(s) = logical_key {
                         if s.as_str() == "p" {
                             self.settings.toggle_wireframe_overlay();
+                        } else if s.as_str() == "n" {
+                            self.settings.set_transparency(
+                                self.settings.transparency - self.settings.transparency_step_size,
+                            );
+                        } else if s.as_str() == "m" {
+                            self.settings.set_transparency(
+                                self.settings.transparency + self.settings.transparency_step_size,
+                            );
                         }
                     } else if let Key::Named(key) = logical_key {
                         if key == NamedKey::PageUp {
-                            self.settings
-                                .set_num_instances_per_row(self.settings.num_instances_per_row + 1);
+                            self.settings.set_num_instances_per_row(
+                                self.settings.num_instances_per_row
+                                    + self.settings.num_instances_step_size,
+                            );
                         } else if key == NamedKey::PageDown {
                             self.settings.set_num_instances_per_row(
-                                self.settings.num_instances_per_row.saturating_sub(1),
+                                self.settings
+                                    .num_instances_per_row
+                                    .saturating_sub(self.settings.num_instances_step_size),
                             );
                         }
                     }
@@ -626,13 +668,20 @@ impl cellular_automata_3d::framework::App for App {
             0,
             bytemuck::cast_slice(&[self.camera_uniform]),
         );
-        if prev_position != self.camera.position {
+        if ((prev_position != self.camera.position) && self.settings.transparency < 1.0)
+            || self.settings.instance_update_required
+        {
+            if (self.instances.len() != (self.settings.num_instances_per_row as usize).pow(3))
+                || self
+                    .instances
+                    .iter()
+                    .any(|i| i.color.w != self.settings.transparency)
+            {
+                // recalculate instance positions
+                self.instances = prepare_instances(&self.settings);
+            }
             // sort instances by distance to camera for correct alpha blending
-            self.instances.sort_by(|a, b| {
-                let a_dist = (a.position - self.camera.position.to_vec()).magnitude();
-                let b_dist = (b.position - self.camera.position.to_vec()).magnitude();
-                b_dist.partial_cmp(&a_dist).unwrap()
-            });
+            self.sort_instances_by_distance_to_camera();
             // update instance buffer
             let instance_data = self
                 .instances
@@ -644,16 +693,7 @@ impl cellular_automata_3d::framework::App for App {
                 contents: bytemuck::cast_slice(&instance_data),
                 usage: wgpu::BufferUsages::VERTEX,
             });
-        }
-        if self.instances.len() != (self.settings.num_instances_per_row as usize).pow(3) {
-            let instances = prepare_instances(&self.settings);
-            let instance_data = instances.iter().map(Instance::to_raw).collect::<Vec<_>>();
-            self.instance_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("Instance Buffer"),
-                contents: bytemuck::cast_slice(&instance_data),
-                usage: wgpu::BufferUsages::VERTEX,
-            });
-            self.instances = instances;
+            self.settings.instance_update_required = false;
         }
     }
 
@@ -719,6 +759,7 @@ impl cellular_automata_3d::framework::App for App {
 }
 
 fn prepare_instances(settings: &Settings) -> Vec<Instance> {
+    let start = std::time::Instant::now();
     let instances = (0..settings.num_instances_per_row)
         .flat_map(|z| {
             (0..settings.num_instances_per_row).flat_map(move |y| {
@@ -755,7 +796,7 @@ fn prepare_instances(settings: &Settings) -> Vec<Instance> {
                         z: (z + settings.space_between_instances)
                             / (settings.space_between_instances
                                 * settings.num_instances_per_row as f32),
-                        w: 0.2,
+                        w: settings.transparency,
                     };
 
                     Instance {
@@ -767,6 +808,7 @@ fn prepare_instances(settings: &Settings) -> Vec<Instance> {
             })
         })
         .collect::<Vec<_>>();
+    log::info!("Time to prepare instances: {:?}", start.elapsed());
     instances
 }
 
