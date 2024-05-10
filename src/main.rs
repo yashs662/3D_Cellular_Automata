@@ -6,7 +6,12 @@ use cellular_automata_3d::{
 };
 use cgmath::{EuclideanSpace, InnerSpace, Rotation3};
 use rayon::prelude::*;
-use std::{borrow::Cow, f32::consts, mem};
+use std::{
+    borrow::Cow,
+    f32::consts,
+    fmt::{Display, Formatter},
+    mem,
+};
 use wgpu::{util::DeviceExt, PipelineCompilationOptions};
 use winit::{
     event::{DeviceEvent, ElementState, KeyEvent, MouseButton, WindowEvent},
@@ -23,7 +28,11 @@ pub struct Settings {
     transparency_step_size: f32,
     space_between_step_size: f32,
     instance_update_required: bool,
+    transparency_update_required: bool,
     angle_threshold_for_sort: f32,
+    fade_time: f32,
+    simulation_tick_rate: u16,
+    last_simulation_tick: std::time::Instant,
 }
 
 impl Default for Settings {
@@ -49,7 +58,11 @@ impl Settings {
             transparency_step_size: 0.1,
             space_between_step_size: 0.05,
             instance_update_required: false,
-            angle_threshold_for_sort: 0.25,
+            transparency_update_required: false,
+            angle_threshold_for_sort: 0.10,
+            fade_time: 1.0,
+            simulation_tick_rate: 50,
+            last_simulation_tick: std::time::Instant::now(),
         }
     }
 
@@ -86,13 +99,14 @@ impl Settings {
             self.transparency = (transparency * 10.0).round() / 10.0;
         }
         log::info!("Transparency set to: {}", self.transparency);
-        self.instance_update_required = true;
+        self.transparency_update_required = true;
     }
 
     pub fn set_space_between_instances(&mut self, space_between_instances: f32) {
         if space_between_instances < (self.cube_size * 2.0) {
             log::error!("Space between instances cannot be less than 0.0");
-            self.space_between_instances = self.cube_size * 2.0;
+            // add a very small value to avoid overlapping instances
+            self.space_between_instances = (self.cube_size * 2.0) + 0.001;
         } else if space_between_instances > ((self.cube_size * 2.0) + 10.0) {
             log::error!("Space between instances cannot be more than 10.0");
             self.space_between_instances = (self.cube_size * 2.0) + 10.0;
@@ -145,19 +159,62 @@ impl Vertex {
     }
 }
 
+#[derive(Clone, Copy, Default, Debug, PartialEq)]
+enum CellStateEnum {
+    #[default]
+    Alive,
+    Fading,
+    Dead,
+}
+
+impl CellStateEnum {
+    fn to_int(self) -> u8 {
+        match self {
+            CellStateEnum::Alive => 1,
+            CellStateEnum::Fading => 2,
+            CellStateEnum::Dead => 0,
+        }
+    }
+}
+
+impl Display for CellStateEnum {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CellStateEnum::Alive => write!(f, "Alive"),
+            CellStateEnum::Fading => write!(f, "Fading"),
+            CellStateEnum::Dead => write!(f, "Dead"),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Default, Debug)]
+struct CellState {
+    state: CellStateEnum,
+    killed_at: Option<std::time::Instant>,
+}
+
 struct Instance {
     position: cgmath::Vector3<f32>,
     rotation: cgmath::Quaternion<f32>,
     color: cgmath::Vector4<f32>,
+    instance_state: CellState,
 }
 
 impl Instance {
-    fn to_raw(&self) -> InstanceRaw {
+    fn to_raw(&self, fade_time: f32, current_transparency_setting: f32) -> InstanceRaw {
         let transform =
             cgmath::Matrix4::from_translation(self.position) * cgmath::Matrix4::from(self.rotation);
         InstanceRaw {
             transform: transform.into(),
             color: self.color.into(),
+            instance_state: self.instance_state.state.to_int(),
+            instance_death_transparency: self.instance_state.killed_at.map_or(
+                current_transparency_setting,
+                |t| {
+                    ((fade_time - t.elapsed().as_secs_f32()) / fade_time)
+                        * current_transparency_setting
+                },
+            ),
         }
     }
 }
@@ -167,6 +224,8 @@ impl Instance {
 struct InstanceRaw {
     transform: [[f32; 4]; 4],
     color: [f32; 4],
+    instance_state: u8,
+    instance_death_transparency: f32,
 }
 
 unsafe impl Pod for InstanceRaw {}
@@ -176,40 +235,43 @@ impl InstanceRaw {
     fn desc() -> wgpu::VertexBufferLayout<'static> {
         wgpu::VertexBufferLayout {
             array_stride: mem::size_of::<InstanceRaw>() as wgpu::BufferAddress,
-            // We need to switch from using a step mode of Vertex to Instance
-            // This means that our shaders will only change to use the next
-            // instance when the shader starts processing a new instance
             step_mode: wgpu::VertexStepMode::Instance,
             attributes: &[
                 wgpu::VertexAttribute {
                     offset: 0,
-                    // While our vertex shader only uses locations 0, and 1 now, in later tutorials we'll
-                    // be using 2, 3, and 4, for Vertex. We'll start at slot 5 not conflict with them later
                     shader_location: 2,
                     format: wgpu::VertexFormat::Float32x4,
                 },
-                // A mat4 takes up 4 vertex slots as it is technically 4 vec4s. We need to define a slot
-                // for each vec4. We don't have to do this in code though.
                 wgpu::VertexAttribute {
                     offset: mem::size_of::<[f32; 4]>() as wgpu::BufferAddress,
                     shader_location: 3,
                     format: wgpu::VertexFormat::Float32x4,
                 },
                 wgpu::VertexAttribute {
-                    offset: mem::size_of::<[f32; 8]>() as wgpu::BufferAddress,
+                    offset: 2 * mem::size_of::<[f32; 4]>() as wgpu::BufferAddress,
                     shader_location: 4,
                     format: wgpu::VertexFormat::Float32x4,
                 },
                 wgpu::VertexAttribute {
-                    offset: mem::size_of::<[f32; 12]>() as wgpu::BufferAddress,
+                    offset: 3 * mem::size_of::<[f32; 4]>() as wgpu::BufferAddress,
                     shader_location: 5,
                     format: wgpu::VertexFormat::Float32x4,
                 },
-                // We need to define a slot for the color
                 wgpu::VertexAttribute {
-                    offset: mem::size_of::<[f32; 16]>() as wgpu::BufferAddress,
+                    offset: 4 * mem::size_of::<[f32; 4]>() as wgpu::BufferAddress,
                     shader_location: 6,
                     format: wgpu::VertexFormat::Float32x4,
+                },
+                wgpu::VertexAttribute {
+                    offset: 5 * mem::size_of::<[f32; 4]>() as wgpu::BufferAddress,
+                    shader_location: 7,
+                    format: wgpu::VertexFormat::Float32,
+                },
+                wgpu::VertexAttribute {
+                    offset: ((5 * mem::size_of::<[f32; 4]>()) + mem::size_of::<f32>())
+                        as wgpu::BufferAddress,
+                    shader_location: 8,
+                    format: wgpu::VertexFormat::Float32,
                 },
             ],
         }
@@ -321,7 +383,78 @@ impl App {
             let b_dist = (b.position - camera_position).magnitude();
             b_dist.partial_cmp(&a_dist).unwrap()
         });
+        self.last_sort_camera = self.camera;
         log::debug!("Time to sort instances: {:?}", start.elapsed());
+    }
+
+    fn update_camera(&mut self, dt: f32, queue: &wgpu::Queue) {
+        self.camera_controller.update_camera(&mut self.camera, dt);
+        self.camera_uniform
+            .update_view_proj(&self.camera, &self.projection);
+        queue.write_buffer(
+            &self.camera_buffer,
+            0,
+            bytemuck::cast_slice(&[self.camera_uniform]),
+        );
+    }
+
+    fn transparency_update(&mut self) {
+        let yaw_diff = (self.camera.yaw - self.last_sort_camera.yaw).0.abs();
+        let pitch_diff = (self.camera.pitch - self.last_sort_camera.pitch).0.abs();
+        if (yaw_diff > self.settings.angle_threshold_for_sort
+            || pitch_diff > self.settings.angle_threshold_for_sort)
+            && self.settings.transparency < 1.0
+        {
+            self.sort_instances_by_distance_to_camera();
+        }
+    }
+
+    fn simulation_update(&mut self, queue: &wgpu::Queue) {
+        if self.settings.last_simulation_tick.elapsed().as_millis()
+            >= self.settings.simulation_tick_rate.into()
+        {
+            let start = std::time::Instant::now();
+            self.settings.last_simulation_tick = std::time::Instant::now();
+            for instance in self.instances.iter_mut() {
+                match instance.instance_state.state {
+                    CellStateEnum::Alive => {
+                        // randomly kill some instances
+                        if rand::random::<f32>() < 0.01 {
+                            instance.instance_state.state = CellStateEnum::Fading;
+                            instance.instance_state.killed_at = Some(std::time::Instant::now());
+                        }
+                    }
+                    CellStateEnum::Fading => {
+                        if let Some(killed_at) = instance.instance_state.killed_at {
+                            if killed_at.elapsed().as_secs_f32() >= self.settings.fade_time {
+                                instance.instance_state.state = CellStateEnum::Dead;
+                            }
+                        }
+                    }
+                    CellStateEnum::Dead => {
+                        // Do nothing
+                    }
+                }
+            }
+            // update the instance buffer
+            let instance_data = self
+                .instances
+                .iter()
+                .map(|instance| {
+                    Instance::to_raw(
+                        instance,
+                        self.settings.fade_time,
+                        self.settings.transparency,
+                    )
+                })
+                .collect::<Vec<_>>();
+            queue.write_buffer(
+                &self.instance_buffer,
+                0,
+                bytemuck::cast_slice(&instance_data),
+            );
+            log::debug!("Time to simulate: {:?}", start.elapsed());
+        }
     }
 }
 
@@ -353,50 +486,25 @@ impl cellular_automata_3d::framework::App for App {
         });
 
         let instances = prepare_instances(&settings);
-
-        let instance_data = instances.iter().map(Instance::to_raw).collect::<Vec<_>>();
+        let instance_data = instances
+            .iter()
+            .map(|instance| Instance::to_raw(instance, settings.fade_time, settings.transparency))
+            .collect::<Vec<_>>();
         let instance_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Instance Buffer"),
             contents: bytemuck::cast_slice(&instance_data),
-            usage: wgpu::BufferUsages::VERTEX,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
         });
 
-        let camera = Camera::new((0.0, 20.0, 30.0), cgmath::Deg(-90.0), cgmath::Deg(-20.0));
-        let projection =
-            Projection::new(config.width, config.height, cgmath::Deg(45.0), 0.1, 100.0);
-        let camera_controller = CameraController::new(10.0, 0.6);
-
-        let mut camera_uniform = CameraUniform::new();
-        camera_uniform.update_view_proj(&camera, &projection);
-        let camera_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Camera Buffer"),
-            contents: bytemuck::cast_slice(&[camera_uniform]),
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        });
-
-        let camera_bind_group_layout =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                entries: &[wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                }],
-                label: Some("camera_bind_group_layout"),
-            });
-
-        let camera_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            layout: &camera_bind_group_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: camera_buffer.as_entire_binding(),
-            }],
-            label: Some("camera_bind_group"),
-        });
+        let (
+            camera,
+            projection,
+            camera_controller,
+            camera_uniform,
+            camera_buffer,
+            camera_bind_group_layout,
+            camera_bind_group,
+        ) = setup_camera(config, device);
 
         // Create pipeline layout
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -695,45 +803,28 @@ impl cellular_automata_3d::framework::App for App {
         }
     }
 
-    fn update(&mut self, dt: f32, queue: &wgpu::Queue, device: &wgpu::Device) {
-        self.camera_controller.update_camera(&mut self.camera, dt);
-        self.camera_uniform
-            .update_view_proj(&self.camera, &self.projection);
-        queue.write_buffer(
-            &self.camera_buffer,
-            0,
-            bytemuck::cast_slice(&[self.camera_uniform]),
-        );
-        let yaw_diff = (self.camera.yaw - self.last_sort_camera.yaw).0.abs();
-        let pitch_diff = (self.camera.pitch - self.last_sort_camera.pitch).0.abs();
-        if (yaw_diff > self.settings.angle_threshold_for_sort
-            || pitch_diff > self.settings.angle_threshold_for_sort)
-            && self.settings.transparency < 1.0
-        {
-            self.sort_instances_by_distance_to_camera();
-            self.last_sort_camera = self.camera;
-            self.settings.instance_update_required = true;
-        }
+    fn update(&mut self, dt: f32, queue: &wgpu::Queue) {
+        self.update_camera(dt, queue);
+        self.transparency_update();
+
         if self.settings.instance_update_required {
-            // recalculate instance positions
             self.instances = prepare_instances(&self.settings);
             if self.settings.transparency < 1.0 {
                 self.sort_instances_by_distance_to_camera();
-                self.last_sort_camera = self.camera;
             }
-            // update instance buffer
-            let instance_data = self
-                .instances
-                .iter()
-                .map(Instance::to_raw)
-                .collect::<Vec<_>>();
-            self.instance_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("Instance Buffer"),
-                contents: bytemuck::cast_slice(&instance_data),
-                usage: wgpu::BufferUsages::VERTEX,
-            });
             self.settings.instance_update_required = false;
         }
+
+        if self.settings.transparency_update_required {
+            self.instances.iter_mut().for_each(|instance| {
+                if instance.instance_state.state == CellStateEnum::Alive {
+                    instance.color.w = self.settings.transparency;
+                }
+            });
+            self.settings.transparency_update_required = false;
+        }
+
+        self.simulation_update(queue);
     }
 
     fn resize(
@@ -797,6 +888,64 @@ impl cellular_automata_3d::framework::App for App {
     }
 }
 
+fn setup_camera(
+    config: &wgpu::SurfaceConfiguration,
+    device: &wgpu::Device,
+) -> (
+    Camera,
+    Projection,
+    CameraController,
+    CameraUniform,
+    wgpu::Buffer,
+    wgpu::BindGroupLayout,
+    wgpu::BindGroup,
+) {
+    let camera = Camera::new((0.0, 20.0, 30.0), cgmath::Deg(-90.0), cgmath::Deg(-20.0));
+    let projection = Projection::new(config.width, config.height, cgmath::Deg(45.0), 0.1, 100.0);
+    let camera_controller = CameraController::new(10.0, 0.6);
+
+    let mut camera_uniform = CameraUniform::new();
+    camera_uniform.update_view_proj(&camera, &projection);
+    let camera_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("Camera Buffer"),
+        contents: bytemuck::cast_slice(&[camera_uniform]),
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+    });
+
+    let camera_bind_group_layout =
+        device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+            label: Some("camera_and_time_bind_group_layout"),
+        });
+
+    let camera_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        layout: &camera_bind_group_layout,
+        entries: &[wgpu::BindGroupEntry {
+            binding: 0,
+            resource: camera_buffer.as_entire_binding(),
+        }],
+        label: Some("camera_and_time_bind_group"),
+    });
+    (
+        camera,
+        projection,
+        camera_controller,
+        camera_uniform,
+        camera_buffer,
+        camera_bind_group_layout,
+        camera_bind_group,
+    )
+}
+
 fn prepare_instances(settings: &Settings) -> Vec<Instance> {
     let start = std::time::Instant::now();
     let instances = (0..settings.num_instances_per_row)
@@ -842,6 +991,7 @@ fn prepare_instances(settings: &Settings) -> Vec<Instance> {
                         position,
                         rotation,
                         color,
+                        instance_state: CellState::default(),
                     }
                 })
             })
