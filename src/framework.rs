@@ -45,7 +45,7 @@ pub trait App: 'static + Sized {
         queue: &wgpu::Queue,
     );
 
-    fn update(&mut self, dt: f32, queue: &wgpu::Queue);
+    fn update(&mut self, dt: f32, queue: &wgpu::Queue, device: &wgpu::Device);
 
     fn update_window_event(&mut self, event: WindowEvent);
 
@@ -398,7 +398,7 @@ async fn start<E: App>(title: &str) {
                         }
 
                         frame_counter.update();
-                        app.as_mut().unwrap().update(frame_counter.get_frame_time(), &context.queue);
+                        app.as_mut().unwrap().update(frame_counter.get_frame_time(), &context.queue, &context.device);
                         let frame = surface.acquire(&context);
                         let view = frame.texture.create_view(&wgpu::TextureViewDescriptor {
                             format: Some(surface.config().view_formats[0]),

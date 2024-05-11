@@ -9,7 +9,6 @@ var<uniform> camera : Camera;
 
 struct VertexInput {
     @location(0) position : vec3 < f32>,
-    @location(1) tex_coords : vec2 < f32>,
 }
 struct InstanceInput {
     @location(2) model_matrix_0 : vec4 < f32>,
@@ -23,8 +22,7 @@ struct InstanceInput {
 
 struct VertexOutput {
     @builtin(position) clip_position : vec4 < f32>,
-    @location(0) tex_coords : vec2 < f32>,
-    @location(1) color : vec4 < f32>,
+    @location(0) color : vec4 < f32>,
 }
 
 @vertex
@@ -40,7 +38,6 @@ instance : InstanceInput,
     );
     var out : VertexOutput;
     let world_position = model_matrix * vec4 < f32 > (model.position, 1.0);
-    out.tex_coords = model.tex_coords;
     out.clip_position = camera.view_proj * (camera.view_pos + world_position);
     if instance.instance_state == 0.0 {
         //Dead cell
