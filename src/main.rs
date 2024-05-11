@@ -105,17 +105,23 @@ impl Settings {
             log::error!("Number of instances per row cannot be more than 100");
             self.num_instances_per_row = 100;
         } else {
-            if num_instances_per_row > self.num_instances_per_row {
-                update_queue.add(UpdateEnum::NumInstancesIncreased);
-            } else if num_instances_per_row < self.num_instances_per_row {
-                update_queue.add(UpdateEnum::NumInstancesDecreased);
+            match num_instances_per_row.cmp(&self.num_instances_per_row) {
+                std::cmp::Ordering::Less => {
+                    update_queue.add(UpdateEnum::NumInstancesDecreased);
+                }
+                std::cmp::Ordering::Greater => {
+                    update_queue.add(UpdateEnum::NumInstancesIncreased);
+                }
+                std::cmp::Ordering::Equal => {
+                    // No change
+                }
             }
             self.num_instances_per_row = num_instances_per_row;
+            log::info!(
+                "Number of instances per row set to: {}",
+                self.num_instances_per_row
+            );
         }
-        log::info!(
-            "Number of instances per row set to: {}",
-            self.num_instances_per_row
-        );
     }
 
     pub fn set_transparency(&mut self, transparency: f32, update_queue: &mut UpdateQueue) {
@@ -236,7 +242,7 @@ struct Instance {
 }
 
 impl Instance {
-    fn to_raw(&self, fade_time: f32, current_transparency_setting: f32) -> InstanceRaw {
+    fn to_raw(self, fade_time: f32, current_transparency_setting: f32) -> InstanceRaw {
         let transform =
             cgmath::Matrix4::from_translation(self.position) * cgmath::Matrix4::from(self.rotation);
         InstanceRaw {
@@ -403,7 +409,7 @@ impl InstanceManager {
     fn prepare_raw_instance_data(&self, settings: &Settings) -> Vec<InstanceRaw> {
         self.flattened
             .iter()
-            .map(|instance| Instance::to_raw(instance, settings.fade_time, settings.transparency))
+            .map(|instance| Instance::to_raw(*instance, settings.fade_time, settings.transparency))
             .collect::<Vec<_>>()
     }
 
@@ -475,7 +481,7 @@ impl InstanceManager {
     ) {
         // update the instance buffer
         let instance_data = self.prepare_raw_instance_data(settings);
-        queue.write_buffer(&instance_buffer, 0, bytemuck::cast_slice(&instance_data));
+        queue.write_buffer(instance_buffer, 0, bytemuck::cast_slice(&instance_data));
     }
 
     fn update_transparency(
@@ -540,7 +546,7 @@ impl InstanceManager {
                         && z < self.instances[x as usize][y as usize].len() as u32
                     {
                         // Copy the instance from self.instances
-                        self.instances[x as usize][y as usize][z as usize].clone()
+                        self.instances[x as usize][y as usize][z as usize]
                     } else {
                         let x = settings.space_between_instances
                             * (x as f32 - (settings.num_instances_per_row - 1) as f32 / 2.0);
