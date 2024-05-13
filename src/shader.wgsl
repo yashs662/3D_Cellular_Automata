@@ -11,13 +11,13 @@ struct VertexInput {
     @location(0) position : vec3 < f32>,
 }
 struct InstanceInput {
-    @location(2) model_matrix_0 : vec4 < f32>,
-    @location(3) model_matrix_1 : vec4 < f32>,
-    @location(4) model_matrix_2 : vec4 < f32>,
-    @location(5) model_matrix_3 : vec4 < f32>,
-    @location(6) color : vec4 < f32>,
-    @location(7) instance_state : f32,
-    @location(8) instance_fade_level : f32,
+    @location(1) model_matrix_0 : vec4 < f32>,
+    @location(2) model_matrix_1 : vec4 < f32>,
+    @location(3) model_matrix_2 : vec4 < f32>,
+    @location(4) model_matrix_3 : vec4 < f32>,
+    @location(5) color : vec4 < f32>,
+    @location(6) instance_state : f32,
+    @location(7) instance_fade_level : f32,
 }
 
 struct VertexOutput {
@@ -57,11 +57,6 @@ instance : InstanceInput,
 }
 
 //Fragment shader
-
-@group(0)
-@binding(1)
-var r_color : texture_2d<u32>;
-
 @fragment
 fn fs_main(vertex : VertexOutput) -> @location(0) vec4 < f32> {
     return vertex.color;

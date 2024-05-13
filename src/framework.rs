@@ -35,7 +35,6 @@ pub trait App: 'static + Sized {
         config: &wgpu::SurfaceConfiguration,
         adapter: &wgpu::Adapter,
         device: &wgpu::Device,
-        queue: &wgpu::Queue,
     ) -> Self;
 
     fn resize(
@@ -340,7 +339,6 @@ async fn start<E: App>(title: &str) {
                             surface.config(),
                             &context.adapter,
                             &context.device,
-                            &context.queue,
                         ));
                     }
                 }

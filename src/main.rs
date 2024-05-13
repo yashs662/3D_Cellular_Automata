@@ -2,10 +2,10 @@ use bytemuck::{Pod, Zeroable};
 use cellular_automata_3d::{
     camera::{Camera, CameraController, CameraUniform, Projection},
     constants::DEPTH_FORMAT,
+    neighbors::NeighborMethod,
     texture::{self, Texture},
 };
 use cgmath::{EuclideanSpace, InnerSpace, Rotation3};
-use rayon::prelude::*;
 use std::{
     borrow::Cow,
     f32::consts,
@@ -57,6 +57,7 @@ pub struct Settings {
     fade_time: f32,
     simulation_tick_rate: u16,
     last_simulation_tick: std::time::Instant,
+    neighbor_method: NeighborMethod,
 }
 
 impl Default for Settings {
@@ -78,13 +79,14 @@ impl Settings {
             cube_size,
             space_between_instances,
             transparency: 0.2,
-            num_instances_step_size: 1,
+            num_instances_step_size: 2,
             transparency_step_size: 0.1,
             space_between_step_size: 0.05,
             angle_threshold_for_sort: 0.10,
-            fade_time: 1.0,
-            simulation_tick_rate: 50,
+            fade_time: 2.0,
+            simulation_tick_rate: 100,
             last_simulation_tick: std::time::Instant::now(),
+            neighbor_method: NeighborMethod::Moore,
         }
     }
 
@@ -98,9 +100,9 @@ impl Settings {
         num_instances_per_row: u32,
         update_queue: &mut UpdateQueue,
     ) {
-        if num_instances_per_row < 1 {
-            log::error!("Number of instances per row cannot be less than 1");
-            self.num_instances_per_row = 1;
+        if num_instances_per_row < 2 {
+            log::error!("Number of instances per row cannot be less than 2");
+            self.num_instances_per_row = 2;
         } else if num_instances_per_row > 100 {
             log::error!("Number of instances per row cannot be more than 100");
             self.num_instances_per_row = 100;
@@ -176,18 +178,11 @@ impl Vertex {
         wgpu::VertexBufferLayout {
             array_stride: mem::size_of::<Vertex>() as wgpu::BufferAddress,
             step_mode: wgpu::VertexStepMode::Vertex,
-            attributes: &[
-                wgpu::VertexAttribute {
-                    offset: 0,
-                    shader_location: 0,
-                    format: wgpu::VertexFormat::Float32x3,
-                },
-                wgpu::VertexAttribute {
-                    offset: mem::size_of::<[f32; 3]>() as wgpu::BufferAddress,
-                    shader_location: 1,
-                    format: wgpu::VertexFormat::Float32x2,
-                },
-            ],
+            attributes: &[wgpu::VertexAttribute {
+                offset: 0,
+                shader_location: 0,
+                format: wgpu::VertexFormat::Float32x3,
+            }],
         }
     }
 
@@ -291,27 +286,6 @@ impl Instance {
             instance_state: CellState::default(),
         }
     }
-
-    fn create_instance_at_pos_debug(settings: &Settings, x: f32, y: f32, z: f32) -> Instance {
-        let position = cgmath::Vector3 { x, y, z };
-
-        let rotation =
-            cgmath::Quaternion::from_axis_angle(cgmath::Vector3::unit_z(), cgmath::Deg(0.0));
-
-        let color = cgmath::Vector4 {
-            x: 1.0,
-            y: 0.0,
-            z: 0.0,
-            w: settings.transparency,
-        };
-
-        Instance {
-            position,
-            rotation,
-            color,
-            instance_state: CellState::default(),
-        }
-    }
 }
 
 #[repr(C)]
@@ -334,38 +308,38 @@ impl InstanceRaw {
             attributes: &[
                 wgpu::VertexAttribute {
                     offset: 0,
-                    shader_location: 2,
+                    shader_location: 1,
                     format: wgpu::VertexFormat::Float32x4,
                 },
                 wgpu::VertexAttribute {
                     offset: mem::size_of::<[f32; 4]>() as wgpu::BufferAddress,
-                    shader_location: 3,
+                    shader_location: 2,
                     format: wgpu::VertexFormat::Float32x4,
                 },
                 wgpu::VertexAttribute {
                     offset: 2 * mem::size_of::<[f32; 4]>() as wgpu::BufferAddress,
-                    shader_location: 4,
+                    shader_location: 3,
                     format: wgpu::VertexFormat::Float32x4,
                 },
                 wgpu::VertexAttribute {
                     offset: 3 * mem::size_of::<[f32; 4]>() as wgpu::BufferAddress,
-                    shader_location: 5,
+                    shader_location: 4,
                     format: wgpu::VertexFormat::Float32x4,
                 },
                 wgpu::VertexAttribute {
                     offset: 4 * mem::size_of::<[f32; 4]>() as wgpu::BufferAddress,
-                    shader_location: 6,
+                    shader_location: 5,
                     format: wgpu::VertexFormat::Float32x4,
                 },
                 wgpu::VertexAttribute {
                     offset: 5 * mem::size_of::<[f32; 4]>() as wgpu::BufferAddress,
-                    shader_location: 7,
+                    shader_location: 6,
                     format: wgpu::VertexFormat::Float32,
                 },
                 wgpu::VertexAttribute {
                     offset: ((5 * mem::size_of::<[f32; 4]>()) + mem::size_of::<f32>())
                         as wgpu::BufferAddress,
-                    shader_location: 8,
+                    shader_location: 7,
                     format: wgpu::VertexFormat::Float32,
                 },
             ],
@@ -376,6 +350,7 @@ impl InstanceRaw {
 struct InstanceManager {
     instances: Vec<Vec<Vec<Instance>>>,
     flattened: Vec<Instance>,
+    sort_map: Vec<usize>,
 }
 
 impl InstanceManager {
@@ -386,12 +361,9 @@ impl InstanceManager {
                     .map(|y| {
                         (0..settings.num_instances_per_row)
                             .map(|z| {
-                                let x = settings.space_between_instances
-                                    * (x as f32 - settings.num_instances_per_row as f32 / 2.0);
-                                let y = settings.space_between_instances
-                                    * (y as f32 - settings.num_instances_per_row as f32 / 2.0);
-                                let z = settings.space_between_instances
-                                    * (z as f32 - settings.num_instances_per_row as f32 / 2.0);
+                                let x = settings.space_between_instances * x as f32;
+                                let y = settings.space_between_instances * y as f32;
+                                let z = settings.space_between_instances * z as f32;
                                 Instance::create_instance_at_pos(settings, x, y, z)
                             })
                             .collect()
@@ -403,6 +375,7 @@ impl InstanceManager {
         InstanceManager {
             instances,
             flattened,
+            sort_map: Vec::new(),
         }
     }
 
@@ -425,12 +398,14 @@ impl InstanceManager {
     fn sort_by_distance_to_camera(&mut self, camera: &Camera) {
         let start = std::time::Instant::now();
         let camera_position = camera.position.to_vec();
-        self.flattened.par_sort_by(|a, b| {
-            let a_dist = (a.position - camera_position).magnitude();
-            let b_dist = (b.position - camera_position).magnitude();
+        self.sort_map = (0..self.flattened.len()).collect();
+        self.sort_map.sort_by(|&i, &j| {
+            let a_dist = (self.flattened[i].position - camera_position).magnitude();
+            let b_dist = (self.flattened[j].position - camera_position).magnitude();
             b_dist.partial_cmp(&a_dist).unwrap()
         });
-        log::debug!("Time to sort instances: {:?}", start.elapsed());
+        self.flattened = self.sort_map.iter().map(|&i| self.flattened[i]).collect();
+        log::info!("Time to sort: {:?}", start.elapsed());
     }
 
     fn flatten(&mut self) {
@@ -443,34 +418,82 @@ impl InstanceManager {
         queue: &wgpu::Queue,
         instance_buffer: &wgpu::Buffer,
     ) {
-        for layer in self.instances.iter_mut() {
-            for row in layer {
-                for instance in row {
+        let start = std::time::Instant::now();
+        if self.sort_map.is_empty() {
+            log::error!("Sort map is empty");
+            return;
+        }
+        for (z, layer) in self.instances.iter_mut().enumerate() {
+            for (y, row) in layer.iter_mut().enumerate() {
+                for (x, _) in row.iter_mut().enumerate() {
+                    let index = (z * settings.num_instances_per_row.pow(2) as usize)
+                        + (y * settings.num_instances_per_row as usize)
+                        + x;
+                    let sorted_index = self.sort_map[index];
+                    let flattened_copy = self.flattened.clone();
+                    let instance = &mut self.flattened[sorted_index];
+                    let mut alive_neighbors = 0;
+                    let neighbors = settings.neighbor_method.get_neighbor_iter();
+                    for (dx, dy, dz) in neighbors {
+                        let x = x as i32 + dx;
+                        let y = y as i32 + dy;
+                        let z = z as i32 + dz;
+                        if x < 0
+                            || y < 0
+                            || z < 0
+                            || x >= settings.num_instances_per_row as i32
+                            || y >= settings.num_instances_per_row as i32
+                            || z >= settings.num_instances_per_row as i32
+                        {
+                            continue;
+                        }
+                        let index = (z * settings.num_instances_per_row.pow(2) as i32)
+                            + (y * settings.num_instances_per_row as i32)
+                            + x;
+                        let neighbor = &flattened_copy[index as usize];
+                        if neighbor.instance_state.state == CellStateEnum::Alive {
+                            alive_neighbors += 1;
+                        }
+                    }
                     match instance.instance_state.state {
                         CellStateEnum::Alive => {
-                            // randomly kill with a chance of 0.01
-                            if rand::random::<f32>() < 0.01 {
+                            if alive_neighbors < 2 || alive_neighbors > 7 {
                                 instance.instance_state.state = CellStateEnum::Fading;
                                 instance.instance_state.killed_at = Some(std::time::Instant::now());
                             }
                         }
                         CellStateEnum::Fading => {
-                            // check if the instance should die
-                            if let Some(killed_at) = instance.instance_state.killed_at {
-                                if killed_at.elapsed().as_secs_f32() >= settings.fade_time {
-                                    instance.instance_state.state = CellStateEnum::Dead;
-                                }
+                            if alive_neighbors == 3
+                                || alive_neighbors == 4
+                                || alive_neighbors == 5
+                                || alive_neighbors == 6
+                            {
+                                instance.instance_state.state = CellStateEnum::Alive;
+                                instance.instance_state.killed_at = None;
+                            } else if instance
+                                .instance_state
+                                .killed_at
+                                .map_or(false, |t| t.elapsed().as_secs_f32() >= settings.fade_time)
+                            {
+                                instance.instance_state.state = CellStateEnum::Dead;
                             }
                         }
                         CellStateEnum::Dead => {
-                            // Do nothing
+                            if alive_neighbors == 3
+                                || alive_neighbors == 4
+                                || alive_neighbors == 5
+                                || alive_neighbors == 6
+                            {
+                                instance.instance_state.state = CellStateEnum::Alive;
+                                instance.instance_state.killed_at = None;
+                            }
                         }
                     }
                 }
             }
         }
-        self.flatten();
         self.update_buffer(settings, queue, instance_buffer);
+        log::info!("Time to simulate: {:?}", start.elapsed());
     }
 
     fn update_buffer(
@@ -541,20 +564,26 @@ impl InstanceManager {
             for y in 0..settings.num_instances_per_row {
                 let mut z_instances: Vec<Instance> = Vec::new();
                 for z in 0..settings.num_instances_per_row {
-                    let instance = if x < self.instances.len() as u32
-                        && y < self.instances[x as usize].len() as u32
-                        && z < self.instances[x as usize][y as usize].len() as u32
+                    let instance = if x == 0
+                        || y == 0
+                        || z == 0
+                        || x == settings.num_instances_per_row - 1
+                        || y == settings.num_instances_per_row - 1
+                        || z == settings.num_instances_per_row - 1
                     {
-                        // Copy the instance from self.instances
-                        self.instances[x as usize][y as usize][z as usize]
+                        // Create a new instance
+                        let x = settings.space_between_instances * x as f32;
+                        let y = settings.space_between_instances * y as f32;
+                        let z = settings.space_between_instances * z as f32;
+                        Instance::create_instance_at_pos(settings, x, y, z)
                     } else {
-                        let x = settings.space_between_instances
-                            * (x as f32 - (settings.num_instances_per_row - 1) as f32 / 2.0);
-                        let y = settings.space_between_instances
-                            * (y as f32 - (settings.num_instances_per_row - 1) as f32 / 2.0);
-                        let z = settings.space_between_instances
-                            * (z as f32 - (settings.num_instances_per_row - 1) as f32 / 2.0);
-                        Instance::create_instance_at_pos_debug(settings, x, y, z)
+                        let mut cached_instance = self.instances[x.saturating_sub(1) as usize]
+                            [y.saturating_sub(1) as usize]
+                            [z.saturating_sub(1) as usize];
+                        cached_instance.position.x += settings.space_between_instances;
+                        cached_instance.position.y += settings.space_between_instances;
+                        cached_instance.position.z += settings.space_between_instances;
+                        cached_instance
                     };
                     z_instances.push(instance);
                 }
@@ -576,18 +605,17 @@ impl InstanceManager {
     ) -> wgpu::Buffer {
         let mut new_instances: Vec<Vec<Vec<Instance>>> = Vec::new();
 
-        for x in 0..settings.num_instances_per_row {
+        // remove the outer layer of instances and keep the cube inside eg initially 12x12x12 then 10x10x10 remove 1 layer from each side
+        for x in 1..settings.num_instances_per_row + 1 {
             let mut y_instances: Vec<Vec<Instance>> = Vec::new();
-            for y in 0..settings.num_instances_per_row {
+            for y in 1..settings.num_instances_per_row + 1 {
                 let mut z_instances: Vec<Instance> = Vec::new();
-                for z in 0..settings.num_instances_per_row {
-                    if x < self.instances.len() as u32
-                        && y < self.instances[x as usize].len() as u32
-                        && z < self.instances[x as usize][y as usize].len() as u32
-                    {
-                        // Copy the instance from self.instances
-                        z_instances.push(self.instances[x as usize][y as usize][z as usize]);
-                    }
+                for z in 1..settings.num_instances_per_row + 1 {
+                    let mut instance = self.instances[x as usize][y as usize][z as usize];
+                    instance.position.x -= settings.space_between_instances;
+                    instance.position.y -= settings.space_between_instances;
+                    instance.position.z -= settings.space_between_instances;
+                    z_instances.push(instance);
                 }
                 y_instances.push(z_instances);
             }
@@ -644,24 +672,6 @@ fn create_vertices(cube_size: f32) -> (Vec<Vertex>, Vec<u16>) {
     ];
 
     (vertex_data.to_vec(), index_data.to_vec())
-}
-
-fn create_texels(size: usize) -> Vec<u8> {
-    (0..size * size)
-        .map(|id| {
-            // get high five for recognizing this ;)
-            let cx = 3.0 * (id % size) as f32 / (size - 1) as f32 - 2.0;
-            let cy = 2.0 * (id / size) as f32 / (size - 1) as f32 - 1.0;
-            let (mut x, mut y, mut count) = (cx, cy, 0);
-            while count < 0xFF && x * x + y * y < 4.0 {
-                let old_x = x;
-                x = x * x - y * y + cx;
-                y = 2.0 * old_x * y + cy;
-                count += 1;
-            }
-            count
-        })
-        .collect()
 }
 
 struct App {
@@ -726,10 +736,10 @@ impl App {
             >= self.settings.simulation_tick_rate.into()
         {
             let start = std::time::Instant::now();
-            self.settings.last_simulation_tick = std::time::Instant::now();
             self.instance_manager
                 .simulate(&self.settings, queue, &self.instance_buffer);
-            log::info!("Time to simulate: {:?}", start.elapsed());
+            self.settings.last_simulation_tick = std::time::Instant::now();
+            log::debug!("Time to simulate: {:?}", start.elapsed());
         }
     }
 
@@ -789,7 +799,6 @@ impl cellular_automata_3d::framework::App for App {
         config: &wgpu::SurfaceConfiguration,
         _adapter: &wgpu::Adapter,
         device: &wgpu::Device,
-        queue: &wgpu::Queue,
     ) -> Self {
         let settings = Settings::new();
         // Create the vertex and index buffers
@@ -807,8 +816,7 @@ impl cellular_automata_3d::framework::App for App {
             usage: wgpu::BufferUsages::INDEX,
         });
 
-        let instances = InstanceManager::prepare_initial_instances(&settings);
-        let instance_buffer = instances.create_new_buffer(&settings, device);
+        let mut instance_manager = InstanceManager::prepare_initial_instances(&settings);
 
         let (
             camera,
@@ -820,68 +828,28 @@ impl cellular_automata_3d::framework::App for App {
             camera_bind_group,
         ) = setup_camera(config, device);
 
+        instance_manager.sort_by_distance_to_camera(&camera);
+        let instance_buffer = instance_manager.create_new_buffer(&settings, device);
+
         // Create pipeline layout
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Render Bind Group Layout"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: wgpu::BufferSize::new(64),
-                    },
-                    count: None,
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: wgpu::BufferSize::new(64),
                 },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        multisampled: false,
-                        sample_type: wgpu::TextureSampleType::Uint,
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                    },
-                    count: None,
-                },
-            ],
+                count: None,
+            }],
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Render Pipeline Layout"),
             bind_group_layouts: &[&bind_group_layout, &camera_bind_group_layout],
             push_constant_ranges: &[],
         });
-
-        // TODO: find out why this is needed
-        // Create the texture
-        let size = 256u32;
-        let texels = create_texels(size as usize);
-        let texture_extent = wgpu::Extent3d {
-            width: size,
-            height: size,
-            depth_or_array_layers: 1,
-        };
-        let texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: None,
-            size: texture_extent,
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::R8Uint,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
-        });
-        let texture_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        queue.write_texture(
-            texture.as_image_copy(),
-            &texels,
-            wgpu::ImageDataLayout {
-                offset: 0,
-                bytes_per_row: Some(size),
-                rows_per_image: None,
-            },
-            texture_extent,
-        );
 
         // Create other resources
         let mx_total = Self::generate_matrix(config.width as f32 / config.height as f32);
@@ -896,16 +864,10 @@ impl cellular_automata_3d::framework::App for App {
         // Create bind group
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             layout: &bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: uniform_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&texture_view),
-                },
-            ],
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: uniform_buf.as_entire_binding(),
+            }],
             label: None,
         });
 
@@ -1031,7 +993,7 @@ impl cellular_automata_3d::framework::App for App {
             uniform_buf,
             pipeline,
             pipeline_wire,
-            instance_manager: instances,
+            instance_manager,
             instance_buffer,
             num_indices: index_data.len() as u32,
             camera,
@@ -1213,7 +1175,7 @@ fn setup_camera(
     wgpu::BindGroupLayout,
     wgpu::BindGroup,
 ) {
-    let camera = Camera::new((-1.0, 20.0, 30.0), cgmath::Deg(-90.0), cgmath::Deg(-30.0));
+    let camera = Camera::new((10.0, 20.0, 40.0), cgmath::Deg(-90.0), cgmath::Deg(-30.0));
     let projection = Projection::new(config.width, config.height, cgmath::Deg(45.0), 0.1, 100.0);
     let camera_controller = CameraController::new(10.0, 0.6);
 
