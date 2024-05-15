@@ -514,16 +514,20 @@ impl InstanceManager {
         instance_buffer: &wgpu::Buffer,
     ) {
         // go throughout the 3d instances and update the transparency then flatten the instances and update the buffer
-        self.instances.iter_mut().for_each(|x| {
-            x.iter_mut().for_each(|y| {
-                y.iter_mut().for_each(|instance| {
-                    if instance.instance_state.state == CellStateEnum::Alive {
-                        instance.color.w = settings.transparency;
-                    }
-                });
-            });
-        });
-        self.flatten();
+        for z in 0..settings.num_instances_per_row {
+            for y in 0..settings.num_instances_per_row {
+                for x in 0..settings.num_instances_per_row {
+                    let index = (z as usize * settings.num_instances_per_row.pow(2) as usize)
+                        + (y as usize * settings.num_instances_per_row as usize)
+                        + x as usize;
+                    let sorted_index = self.sort_map[index];
+                    let instance = &mut self.flattened[sorted_index];
+                    instance.color.w = settings.transparency;
+                    let instance = &mut self.instances[z as usize][y as usize][x as usize];
+                    instance.color.w = settings.transparency;
+                }
+            }
+        }
         self.update_buffer(settings, queue, instance_buffer)
     }
 
@@ -534,20 +538,34 @@ impl InstanceManager {
         instance_buffer: &wgpu::Buffer,
     ) {
         // go throughout the 3d instances and update the position then flatten the instances and update the buffer
-        self.instances.iter_mut().for_each(|x| {
-            x.iter_mut().for_each(|y| {
-                y.iter_mut().for_each(|instance| {
-                    let x = settings.space_between_instances
+        for z in 0..settings.num_instances_per_row {
+            for y in 0..settings.num_instances_per_row {
+                for x in 0..settings.num_instances_per_row {
+                    let index = (z as usize * settings.num_instances_per_row.pow(2) as usize)
+                        + (y as usize * settings.num_instances_per_row as usize)
+                        + x as usize;
+                    let sorted_index = self.sort_map[index];
+                    let instance = &mut self.flattened[sorted_index];
+                    let ix = settings.space_between_instances
                         * (instance.position.x / settings.space_between_instances).round();
-                    let y = settings.space_between_instances
+                    let iy = settings.space_between_instances
                         * (instance.position.y / settings.space_between_instances).round();
-                    let z = settings.space_between_instances
+                    let iz = settings.space_between_instances
                         * (instance.position.z / settings.space_between_instances).round();
-                    instance.position = cgmath::Vector3 { x, y, z };
-                });
-            });
-        });
-        self.flatten();
+                    instance.position = cgmath::Vector3 {
+                        x: ix,
+                        y: iy,
+                        z: iz,
+                    };
+                    let instance = &mut self.instances[z as usize][y as usize][x as usize];
+                    instance.position = cgmath::Vector3 {
+                        x: ix,
+                        y: iy,
+                        z: iz,
+                    };
+                }
+            }
+        }
         self.update_buffer(settings, queue, instance_buffer)
     }
 
@@ -723,9 +741,8 @@ impl App {
     fn transparency_update(&mut self) {
         let yaw_diff = (self.camera.yaw - self.last_sort_camera.yaw).0.abs();
         let pitch_diff = (self.camera.pitch - self.last_sort_camera.pitch).0.abs();
-        if (yaw_diff > self.settings.angle_threshold_for_sort
-            || pitch_diff > self.settings.angle_threshold_for_sort)
-            && self.settings.transparency < 1.0
+        if yaw_diff > self.settings.angle_threshold_for_sort
+            || pitch_diff > self.settings.angle_threshold_for_sort
         {
             self.update_queue.add(UpdateEnum::SortInstances);
         }
