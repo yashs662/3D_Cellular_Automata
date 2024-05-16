@@ -1,5 +1,6 @@
 use bytemuck::{Pod, Zeroable};
 use cgmath::{perspective, InnerSpace, Matrix4, Point3, Rad, SquareMatrix, Vector3};
+use wgpu::util::DeviceExt;
 use winit::{
     dpi::PhysicalPosition,
     event::{ElementState, MouseScrollDelta},
@@ -236,4 +237,62 @@ impl CameraUniform {
         self.view_position = camera.position.to_homogeneous().into();
         self.view_proj = (projection.calc_matrix() * camera.calc_matrix()).into();
     }
+}
+
+pub fn setup_camera(
+    config: &wgpu::SurfaceConfiguration,
+    device: &wgpu::Device,
+) -> (
+    Camera,
+    Projection,
+    CameraController,
+    CameraUniform,
+    wgpu::Buffer,
+    wgpu::BindGroupLayout,
+    wgpu::BindGroup,
+) {
+    let camera = Camera::new((10.0, 20.0, 40.0), cgmath::Deg(-90.0), cgmath::Deg(-30.0));
+    let projection = Projection::new(config.width, config.height, cgmath::Deg(45.0), 0.1, 100.0);
+    let camera_controller = CameraController::new(10.0, 0.6);
+
+    let mut camera_uniform = CameraUniform::new();
+    camera_uniform.update_view_proj(&camera, &projection);
+    let camera_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("Camera Buffer"),
+        contents: bytemuck::cast_slice(&[camera_uniform]),
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+    });
+
+    let camera_bind_group_layout =
+        device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+            label: Some("camera_and_time_bind_group_layout"),
+        });
+
+    let camera_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        layout: &camera_bind_group_layout,
+        entries: &[wgpu::BindGroupEntry {
+            binding: 0,
+            resource: camera_buffer.as_entire_binding(),
+        }],
+        label: Some("camera_and_time_bind_group"),
+    });
+    (
+        camera,
+        projection,
+        camera_controller,
+        camera_uniform,
+        camera_buffer,
+        camera_bind_group_layout,
+        camera_bind_group,
+    )
 }

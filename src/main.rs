@@ -1,16 +1,19 @@
 use bytemuck::{Pod, Zeroable};
 use cellular_automata_3d::{
-    camera::{Camera, CameraController, CameraUniform, Projection},
+    camera::{setup_camera, Camera, CameraController, CameraUniform, Projection},
     constants::DEPTH_FORMAT,
     neighbors::NeighborMethod,
     texture::{self, Texture},
 };
 use cgmath::{EuclideanSpace, InnerSpace, Rotation3};
+use rand::Rng;
+use rayon::prelude::*;
 use std::{
     borrow::Cow,
     f32::consts,
     fmt::{Display, Formatter},
     mem,
+    sync::{Arc, Mutex},
 };
 use wgpu::{util::DeviceExt, PipelineCompilationOptions};
 use winit::{
@@ -58,6 +61,8 @@ pub struct Settings {
     simulation_tick_rate: u16,
     last_simulation_tick: std::time::Instant,
     neighbor_method: NeighborMethod,
+    spawn_size: u32,
+    noise_amount: u8,
 }
 
 impl Default for Settings {
@@ -69,9 +74,27 @@ impl Default for Settings {
 impl Settings {
     pub fn new() -> Self {
         let wireframe_overlay = false;
-        let num_instances_per_row = 10;
+        let num_instances_per_row = 20;
+        let spawn_size = 10;
         let cube_size = 1.0;
         let space_between_instances = (cube_size * 2.0) + 0.1;
+
+        // make sure spawn size is even and not more than the number of instances per row
+        let spawn_size = if spawn_size % 2 == 0 {
+            spawn_size
+        } else {
+            log::warn!("Spawn size must be even, setting to: {}", spawn_size + 1);
+            spawn_size + 1
+        };
+        let spawn_size = if spawn_size > num_instances_per_row {
+            log::warn!(
+                "Spawn size cannot be more than the number of instances per row, setting to: {}",
+                num_instances_per_row
+            );
+            num_instances_per_row
+        } else {
+            spawn_size
+        };
 
         Settings {
             wireframe_overlay,
@@ -84,9 +107,11 @@ impl Settings {
             space_between_step_size: 0.05,
             angle_threshold_for_sort: 0.10,
             fade_time: 2.0,
-            simulation_tick_rate: 100,
+            simulation_tick_rate: 10,
             last_simulation_tick: std::time::Instant::now(),
             neighbor_method: NeighborMethod::Moore,
+            spawn_size,
+            noise_amount: 1,
         }
     }
 
@@ -243,7 +268,7 @@ impl Instance {
         InstanceRaw {
             transform: transform.into(),
             color: self.color.into(),
-            instance_state: self.instance_state.state.to_int(),
+            instance_state: self.instance_state.state.to_int() as f32,
             instance_death_transparency: self.instance_state.killed_at.map_or(
                 current_transparency_setting,
                 |t| {
@@ -259,14 +284,6 @@ impl Instance {
 
         let rotation =
             cgmath::Quaternion::from_axis_angle(cgmath::Vector3::unit_z(), cgmath::Deg(0.0));
-
-        // random color
-        // let color = cgmath::Vector4 {
-        //     x: rand::random::<f32>(),
-        //     y: rand::random::<f32>(),
-        //     z: rand::random::<f32>(),
-        //     w: settings.transparency,
-        // };
 
         // give a color based on position
         let color = cgmath::Vector4 {
@@ -286,6 +303,31 @@ impl Instance {
             instance_state: CellState::default(),
         }
     }
+
+    fn create_dead_instance_at_pos(x: f32, y: f32, z: f32) -> Instance {
+        let position = cgmath::Vector3 { x, y, z };
+
+        let rotation =
+            cgmath::Quaternion::from_axis_angle(cgmath::Vector3::unit_z(), cgmath::Deg(0.0));
+
+        // give a color based on position
+        let color = cgmath::Vector4 {
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+            w: 0.0,
+        };
+
+        Instance {
+            position,
+            rotation,
+            color,
+            instance_state: CellState {
+                state: CellStateEnum::Dead,
+                killed_at: None,
+            },
+        }
+    }
 }
 
 #[repr(C)]
@@ -293,7 +335,7 @@ impl Instance {
 struct InstanceRaw {
     transform: [[f32; 4]; 4],
     color: [f32; 4],
-    instance_state: u8,
+    instance_state: f32,
     instance_death_transparency: f32,
 }
 
@@ -355,16 +397,39 @@ struct InstanceManager {
 
 impl InstanceManager {
     fn prepare_initial_instances(settings: &Settings) -> InstanceManager {
+        let mut rng = rand::thread_rng();
         let instances: Vec<Vec<Vec<Instance>>> = (0..settings.num_instances_per_row)
             .map(|x| {
                 (0..settings.num_instances_per_row)
                     .map(|y| {
                         (0..settings.num_instances_per_row)
                             .map(|z| {
-                                let x = settings.space_between_instances * x as f32;
-                                let y = settings.space_between_instances * y as f32;
-                                let z = settings.space_between_instances * z as f32;
-                                Instance::create_instance_at_pos(settings, x, y, z)
+                                let rand_offset = rng.gen_range(0..settings.noise_amount);
+                                let rand_offset = if rand::random::<f32>() > 0.5 {
+                                    rand_offset as f32
+                                } else {
+                                    rand_offset as f32 * -1.0
+                                };
+                                let half_total = settings.num_instances_per_row as f32 / 2.0;
+                                let half_spawn = settings.spawn_size as f32 / 2.0;
+                                let x_scaled = x as f32 * settings.space_between_instances;
+                                let y_scaled = y as f32 * settings.space_between_instances;
+                                let z_scaled = z as f32 * settings.space_between_instances;
+                                if ((x as f32) < half_total - half_spawn + rand_offset)
+                                    || ((x as f32) >= half_total + half_spawn + rand_offset)
+                                    || ((y as f32) < half_total - half_spawn + rand_offset)
+                                    || ((y as f32) >= half_total + half_spawn + rand_offset)
+                                    || ((z as f32) < half_total - half_spawn + rand_offset)
+                                    || ((z as f32) >= half_total + half_spawn + rand_offset)
+                                {
+                                    Instance::create_dead_instance_at_pos(
+                                        x_scaled, y_scaled, z_scaled,
+                                    )
+                                } else {
+                                    Instance::create_instance_at_pos(
+                                        settings, x_scaled, y_scaled, z_scaled,
+                                    )
+                                }
                             })
                             .collect()
                     })
@@ -398,7 +463,11 @@ impl InstanceManager {
     fn sort_by_distance_to_camera(&mut self, camera: &Camera) {
         let start = std::time::Instant::now();
         let camera_position = camera.position.to_vec();
-        self.sort_map = (0..self.flattened.len()).collect();
+
+        if self.sort_map.is_empty() {
+            self.sort_map = (0..self.flattened.len()).collect();
+        };
+
         self.sort_map.sort_by(|&i, &j| {
             let a_dist = (self.flattened[i].position - camera_position).magnitude();
             let b_dist = (self.flattened[j].position - camera_position).magnitude();
@@ -418,82 +487,84 @@ impl InstanceManager {
         queue: &wgpu::Queue,
         instance_buffer: &wgpu::Buffer,
     ) {
-        let start = std::time::Instant::now();
         if self.sort_map.is_empty() {
             log::error!("Sort map is empty");
             return;
         }
-        for (z, layer) in self.instances.iter_mut().enumerate() {
-            for (y, row) in layer.iter_mut().enumerate() {
-                for (x, _) in row.iter_mut().enumerate() {
-                    let index = (z * settings.num_instances_per_row.pow(2) as usize)
-                        + (y * settings.num_instances_per_row as usize)
-                        + x;
-                    let sorted_index = self.sort_map[index];
-                    let flattened_copy = self.flattened.clone();
-                    let instance = &mut self.flattened[sorted_index];
-                    let mut alive_neighbors = 0;
-                    let neighbors = settings.neighbor_method.get_neighbor_iter();
-                    for (dx, dy, dz) in neighbors {
-                        let x = x as i32 + dx;
-                        let y = y as i32 + dy;
-                        let z = z as i32 + dz;
-                        if x < 0
-                            || y < 0
-                            || z < 0
-                            || x >= settings.num_instances_per_row as i32
-                            || y >= settings.num_instances_per_row as i32
-                            || z >= settings.num_instances_per_row as i32
-                        {
-                            continue;
-                        }
-                        let index = (z * settings.num_instances_per_row.pow(2) as i32)
-                            + (y * settings.num_instances_per_row as i32)
-                            + x;
-                        let neighbor = &flattened_copy[index as usize];
-                        if neighbor.instance_state.state == CellStateEnum::Alive {
-                            alive_neighbors += 1;
-                        }
-                    }
-                    match instance.instance_state.state {
-                        CellStateEnum::Alive => {
-                            if alive_neighbors < 2 || alive_neighbors > 7 {
-                                instance.instance_state.state = CellStateEnum::Fading;
-                                instance.instance_state.killed_at = Some(std::time::Instant::now());
+        let flattened = Arc::new(Mutex::new(self.flattened.clone()));
+        self.instances
+            .par_iter_mut()
+            .enumerate()
+            .for_each(|(z, layer)| {
+                for (y, row) in layer.iter_mut().enumerate() {
+                    for (x, instance) in row.iter_mut().enumerate() {
+                        let mut alive_neighbors = 0;
+                        let neighbors = settings.neighbor_method.get_neighbor_iter();
+                        for (dx, dy, dz) in neighbors {
+                            let x = x as i32 + dx;
+                            let y = y as i32 + dy;
+                            let z = z as i32 + dz;
+                            if x < 0
+                                || y < 0
+                                || z < 0
+                                || x >= settings.num_instances_per_row as i32
+                                || y >= settings.num_instances_per_row as i32
+                                || z >= settings.num_instances_per_row as i32
+                            {
+                                continue;
+                            }
+                            let index = (z * settings.num_instances_per_row.pow(2) as i32)
+                                + (y * settings.num_instances_per_row as i32)
+                                + x;
+                            let neighbor = &self.flattened[index as usize];
+                            if neighbor.instance_state.state == CellStateEnum::Alive {
+                                alive_neighbors += 1;
                             }
                         }
-                        CellStateEnum::Fading => {
-                            if alive_neighbors == 3
-                                || alive_neighbors == 4
-                                || alive_neighbors == 5
-                                || alive_neighbors == 6
-                            {
-                                instance.instance_state.state = CellStateEnum::Alive;
-                                instance.instance_state.killed_at = None;
-                            } else if instance
-                                .instance_state
-                                .killed_at
-                                .map_or(false, |t| t.elapsed().as_secs_f32() >= settings.fade_time)
-                            {
-                                instance.instance_state.state = CellStateEnum::Dead;
+                        let index = (z as i32 * settings.num_instances_per_row.pow(2) as i32)
+                            + (y as i32 * settings.num_instances_per_row as i32)
+                            + x as i32;
+                        let sorted_index = self.sort_map[index as usize];
+                        let flattened_instance = &mut flattened.lock().unwrap()[sorted_index];
+
+                        match instance.instance_state.state {
+                            CellStateEnum::Alive => {
+                                if !(2..=10).contains(&alive_neighbors) {
+                                    instance.instance_state.state = CellStateEnum::Dead;
+                                    instance.instance_state.killed_at =
+                                        Some(std::time::Instant::now());
+                                    flattened_instance.instance_state.state = CellStateEnum::Dead;
+                                    flattened_instance.instance_state.killed_at =
+                                        Some(std::time::Instant::now());
+                                }
                             }
-                        }
-                        CellStateEnum::Dead => {
-                            if alive_neighbors == 3
-                                || alive_neighbors == 4
-                                || alive_neighbors == 5
-                                || alive_neighbors == 6
-                            {
-                                instance.instance_state.state = CellStateEnum::Alive;
-                                instance.instance_state.killed_at = None;
+                            CellStateEnum::Fading => {
+                                if alive_neighbors == 1 || alive_neighbors == 3 {
+                                    instance.instance_state.state = CellStateEnum::Alive;
+                                    instance.instance_state.killed_at = None;
+                                    flattened_instance.instance_state.state = CellStateEnum::Alive;
+                                    flattened_instance.instance_state.killed_at = None;
+                                } else if instance.instance_state.killed_at.map_or(false, |t| {
+                                    t.elapsed().as_secs_f32() >= settings.fade_time
+                                }) {
+                                    instance.instance_state.state = CellStateEnum::Dead;
+                                    flattened_instance.instance_state.state = CellStateEnum::Dead;
+                                }
+                            }
+                            CellStateEnum::Dead => {
+                                if alive_neighbors == 1 || alive_neighbors == 3 {
+                                    instance.instance_state.state = CellStateEnum::Alive;
+                                    instance.instance_state.killed_at = None;
+                                    flattened_instance.instance_state.state = CellStateEnum::Alive;
+                                    flattened_instance.instance_state.killed_at = None;
+                                }
                             }
                         }
                     }
                 }
-            }
-        }
+            });
+        self.flattened = flattened.lock().unwrap().clone();
         self.update_buffer(settings, queue, instance_buffer);
-        log::info!("Time to simulate: {:?}", start.elapsed());
     }
 
     fn update_buffer(
@@ -914,7 +985,7 @@ impl cellular_automata_3d::framework::App for App {
                             dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
                             operation: wgpu::BlendOperation::Add,
                         },
-                        alpha: wgpu::BlendComponent::REPLACE,
+                        alpha: wgpu::BlendComponent::OVER,
                     }),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
@@ -1178,64 +1249,6 @@ impl cellular_automata_3d::framework::App for App {
 
         queue.submit(Some(encoder.finish()));
     }
-}
-
-fn setup_camera(
-    config: &wgpu::SurfaceConfiguration,
-    device: &wgpu::Device,
-) -> (
-    Camera,
-    Projection,
-    CameraController,
-    CameraUniform,
-    wgpu::Buffer,
-    wgpu::BindGroupLayout,
-    wgpu::BindGroup,
-) {
-    let camera = Camera::new((10.0, 20.0, 40.0), cgmath::Deg(-90.0), cgmath::Deg(-30.0));
-    let projection = Projection::new(config.width, config.height, cgmath::Deg(45.0), 0.1, 100.0);
-    let camera_controller = CameraController::new(10.0, 0.6);
-
-    let mut camera_uniform = CameraUniform::new();
-    camera_uniform.update_view_proj(&camera, &projection);
-    let camera_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some("Camera Buffer"),
-        contents: bytemuck::cast_slice(&[camera_uniform]),
-        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-    });
-
-    let camera_bind_group_layout =
-        device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            }],
-            label: Some("camera_and_time_bind_group_layout"),
-        });
-
-    let camera_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        layout: &camera_bind_group_layout,
-        entries: &[wgpu::BindGroupEntry {
-            binding: 0,
-            resource: camera_buffer.as_entire_binding(),
-        }],
-        label: Some("camera_and_time_bind_group"),
-    });
-    (
-        camera,
-        projection,
-        camera_controller,
-        camera_uniform,
-        camera_buffer,
-        camera_bind_group_layout,
-        camera_bind_group,
-    )
 }
 
 pub fn main() {
