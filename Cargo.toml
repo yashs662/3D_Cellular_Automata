@@ -16,3 +16,5 @@ bytemuck = "1.15.0"
 glam = "0.27.0"
 cgmath = "0.18.0"
 rayon = "1.10.0"
+clap = { version = "4.5.4", features = ["derive"] }
+human-panic = "2.0.0"

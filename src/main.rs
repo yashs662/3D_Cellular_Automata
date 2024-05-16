@@ -2,10 +2,11 @@ use bytemuck::{Pod, Zeroable};
 use cellular_automata_3d::{
     camera::{setup_camera, Camera, CameraController, CameraUniform, Projection},
     constants::DEPTH_FORMAT,
-    neighbors::NeighborMethod,
+    simulation::{NeighborMethod, SimulationRules},
     texture::{self, Texture},
 };
 use cgmath::{EuclideanSpace, InnerSpace, Rotation3};
+use clap::{command, Parser};
 use rand::Rng;
 use rayon::prelude::*;
 use std::{
@@ -63,16 +64,17 @@ pub struct Settings {
     neighbor_method: NeighborMethod,
     spawn_size: u32,
     noise_amount: u8,
+    simulation_rules: SimulationRules,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self::new()
+        Self::new(SimulationRules::default())
     }
 }
 
 impl Settings {
-    pub fn new() -> Self {
+    pub fn new(simulation_rules: SimulationRules) -> Self {
         let wireframe_overlay = false;
         let num_instances_per_row = 20;
         let spawn_size = 10;
@@ -112,6 +114,7 @@ impl Settings {
             neighbor_method: NeighborMethod::Moore,
             spawn_size,
             noise_amount: 1,
+            simulation_rules,
         }
     }
 
@@ -466,7 +469,14 @@ impl InstanceManager {
 
         if self.sort_map.is_empty() {
             self.sort_map = (0..self.flattened.len()).collect();
-        };
+        } else if self.sort_map.len() > self.flattened.len() {
+            // we have reduced the number of instances
+            self.sort_map = (0..self.flattened.len()).collect();
+        } else if self.sort_map.len() < self.flattened.len() {
+            // we have increased the number of instances
+            self.sort_map
+                .extend(self.sort_map.len()..self.flattened.len());
+        }
 
         self.sort_map.sort_by(|&i, &j| {
             let a_dist = (self.flattened[i].position - camera_position).magnitude();
@@ -529,7 +539,11 @@ impl InstanceManager {
 
                         match instance.instance_state.state {
                             CellStateEnum::Alive => {
-                                if !(2..=10).contains(&alive_neighbors) {
+                                if !settings
+                                    .simulation_rules
+                                    .survival
+                                    .contains(&alive_neighbors)
+                                {
                                     instance.instance_state.state = CellStateEnum::Dead;
                                     instance.instance_state.killed_at =
                                         Some(std::time::Instant::now());
@@ -539,7 +553,7 @@ impl InstanceManager {
                                 }
                             }
                             CellStateEnum::Fading => {
-                                if alive_neighbors == 1 || alive_neighbors == 3 {
+                                if settings.simulation_rules.birth.contains(&alive_neighbors) {
                                     instance.instance_state.state = CellStateEnum::Alive;
                                     instance.instance_state.killed_at = None;
                                     flattened_instance.instance_state.state = CellStateEnum::Alive;
@@ -552,7 +566,7 @@ impl InstanceManager {
                                 }
                             }
                             CellStateEnum::Dead => {
-                                if alive_neighbors == 1 || alive_neighbors == 3 {
+                                if settings.simulation_rules.birth.contains(&alive_neighbors) {
                                     instance.instance_state.state = CellStateEnum::Alive;
                                     instance.instance_state.killed_at = None;
                                     flattened_instance.instance_state.state = CellStateEnum::Alive;
@@ -563,7 +577,7 @@ impl InstanceManager {
                     }
                 }
             });
-        self.flattened = flattened.lock().unwrap().clone();
+        self.flattened.clone_from(&flattened.lock().unwrap());
         self.update_buffer(settings, queue, instance_buffer);
     }
 
@@ -661,9 +675,9 @@ impl InstanceManager {
                         || z == settings.num_instances_per_row - 1
                     {
                         // Create a new instance
-                        let x = settings.space_between_instances * x as f32;
-                        let y = settings.space_between_instances * y as f32;
-                        let z = settings.space_between_instances * z as f32;
+                        let x = x as f32 * settings.space_between_instances;
+                        let y = y as f32 * settings.space_between_instances;
+                        let z = z as f32 * settings.space_between_instances;
                         Instance::create_instance_at_pos(settings, x, y, z)
                     } else {
                         let mut cached_instance = self.instances[x.saturating_sub(1) as usize]
@@ -887,8 +901,9 @@ impl cellular_automata_3d::framework::App for App {
         config: &wgpu::SurfaceConfiguration,
         _adapter: &wgpu::Adapter,
         device: &wgpu::Device,
+        simulation_rules: &SimulationRules,
     ) -> Self {
-        let settings = Settings::new();
+        let settings = Settings::new(simulation_rules.clone());
         // Create the vertex and index buffers
         let (vertex_data, index_data) = create_vertices(settings.cube_size);
 
@@ -1251,6 +1266,48 @@ impl cellular_automata_3d::framework::App for App {
     }
 }
 
+// Initialize logging in platform dependant ways.
+fn init_logger(debug_mode: bool) {
+    let filter_level = if debug_mode {
+        log::LevelFilter::Debug
+    } else {
+        log::LevelFilter::Info
+    };
+
+    env_logger::builder()
+        .filter_level(filter_level)
+        // We keep wgpu at Error level, as it's very noisy.
+        .filter_module("wgpu_core", log::LevelFilter::Info)
+        .filter_module("wgpu_hal", log::LevelFilter::Error)
+        .filter_module("naga", log::LevelFilter::Error)
+        .parse_default_env()
+        .init();
+}
+
+#[derive(Parser, Debug)]
+#[command(
+    version,
+    about,
+    long_about = "A 3D cellular automata simulation using wgpu."
+)]
+struct CommandLineArgs {
+    /// The rules for the simulation in the format S/B/N/M"
+    /// where S is the survival rules, B is the birth rules, N is the number of states, and M is the neighbor method.
+    /// survival and birth can be in the format 0-2,4,6-11,13-17,21-26/9-10,16,23-24. where - is a range between <x>-<y> and , is a list of numbers.
+    /// N is a number between 1 and 255 and the last is either M or V for Von Neumann or Moore neighborhood.
+    /// Example: 4/4/5/M
+    #[arg(short, long)]
+    rules: Option<String>,
+    /// Enable Debug mode
+    /// This will enable debug mode which will print out more information to the console.
+    #[arg(short, long)]
+    debug: bool,
+}
+
 pub fn main() {
-    cellular_automata_3d::framework::run::<App>("cube");
+    human_panic::setup_panic!();
+    let args: CommandLineArgs = CommandLineArgs::parse();
+    init_logger(args.debug);
+    let rules = SimulationRules::parse_rules(args.rules.as_deref());
+    cellular_automata_3d::framework::run::<App>("cube", rules);
 }

@@ -8,6 +8,8 @@ use winit::{
     window::Window,
 };
 
+use crate::simulation::SimulationRules;
+
 pub trait App: 'static + Sized {
     const SRGB: bool = true;
 
@@ -35,6 +37,7 @@ pub trait App: 'static + Sized {
         config: &wgpu::SurfaceConfiguration,
         adapter: &wgpu::Adapter,
         device: &wgpu::Device,
+        simulation_rules: &SimulationRules,
     ) -> Self;
 
     fn resize(
@@ -51,18 +54,6 @@ pub trait App: 'static + Sized {
     fn update_device_event(&mut self, event: DeviceEvent);
 
     fn render(&mut self, view: &wgpu::TextureView, device: &wgpu::Device, queue: &wgpu::Queue);
-}
-
-// Initialize logging in platform dependant ways.
-fn init_logger() {
-    env_logger::builder()
-        .filter_level(log::LevelFilter::Info)
-        // We keep wgpu at Error level, as it's very noisy.
-        .filter_module("wgpu_core", log::LevelFilter::Info)
-        .filter_module("wgpu_hal", log::LevelFilter::Error)
-        .filter_module("naga", log::LevelFilter::Error)
-        .parse_default_env()
-        .init();
 }
 
 struct EventLoopWrapper {
@@ -315,8 +306,7 @@ impl FrameCounter {
     }
 }
 
-async fn start<E: App>(title: &str) {
-    init_logger();
+async fn start<E: App>(title: &str, simulation_rules: SimulationRules) {
     let window_loop = EventLoopWrapper::new(title);
     let mut surface = SurfaceWrapper::new();
     let context = AppContext::init_async::<E>(&mut surface, window_loop.window.clone()).await;
@@ -339,6 +329,7 @@ async fn start<E: App>(title: &str) {
                             surface.config(),
                             &context.adapter,
                             &context.device,
+                            &simulation_rules
                         ));
                     }
                 }
@@ -421,6 +412,6 @@ async fn start<E: App>(title: &str) {
     log::info!("Event loop ended with result {:?}", loop_result);
 }
 
-pub fn run<E: App>(title: &'static str) {
-    pollster::block_on(start::<E>(title));
+pub fn run<E: App>(title: &'static str, simulation_rules: SimulationRules) {
+    pollster::block_on(start::<E>(title, simulation_rules));
 }
