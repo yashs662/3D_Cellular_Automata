@@ -90,7 +90,7 @@ impl Settings {
         // Add 1 to avoid no noise on setting noise to 1 as it will calculate random offset from 0 to 1
         // which is not visible in the grid, hence we need at least 2 to see the noise
         let noise_amount =
-            (Validator::validate_noise_amount(command_line_args.noise_level.unwrap_or(5)) + 1)
+            (Validator::validate_noise_amount(command_line_args.noise_level.unwrap_or(0)) + 1)
                 .min(10);
         let wireframe_overlay = false;
         let cube_size = 1.0;
