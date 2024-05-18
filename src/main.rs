@@ -104,10 +104,10 @@ impl Settings {
         let last_simulation_tick = std::time::Instant::now();
         let simulation_paused = true; // Start simulation paused
 
-        log::info!("Setting simulation tick rate to: {}", simulation_tick_rate);
-        log::info!("Setting domain size to: {}", domain_size);
-        log::info!("Setting initial spawn size to: {}", spawn_size);
-        log::info!("Setting noise level to: {}", noise_amount);
+        log::debug!("Setting simulation tick rate to: {}", simulation_tick_rate);
+        log::debug!("Setting domain size to: {}", domain_size);
+        log::debug!("Setting initial spawn size to: {}", spawn_size);
+        log::debug!("Setting noise level to: {}", noise_amount);
 
         Settings {
             wireframe_overlay,
@@ -379,15 +379,6 @@ impl InstanceManager {
         let mut instance_manager = InstanceManager::default(settings);
         instance_manager.prepare_initial_instances(settings);
         instance_manager.flatten();
-        // log the position of the first and last instance in self.flatten
-        log::info!(
-            "First instance position: {:?}",
-            instance_manager.flattened.first().unwrap().position
-        );
-        log::info!(
-            "Last instance position: {:?}",
-            instance_manager.flattened.last().unwrap().position
-        );
         instance_manager
     }
 
@@ -587,7 +578,7 @@ impl InstanceManager {
             self.flatten();
             self.update_buffer(settings, queue, instance_buffer);
         } else {
-            log::info!("Simulation has reached a stable state, pausing simulation");
+            log::warn!("Simulation has reached a stable state, pausing simulation");
             settings.simulation_paused = true;
         }
     }
