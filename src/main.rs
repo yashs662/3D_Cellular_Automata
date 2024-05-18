@@ -40,6 +40,7 @@ impl UpdateQueue {
     }
 }
 
+#[derive(PartialEq)]
 enum UpdateEnum {
     Transparency,
     NumInstancesIncreased,
@@ -48,10 +49,12 @@ enum UpdateEnum {
     SortInstances,
     UpdateBoundingBox,
     UpdateBuffer,
+    CreateNewBuffer,
 }
 
 pub struct Settings {
-    wireframe_overlay: bool,
+    bounding_box_active: bool,
+    world_grid_active: bool,
     domain_size: u32,
     cube_size: f32,
     space_between_instances: f32,
@@ -92,7 +95,9 @@ impl Settings {
         let noise_amount =
             (Validator::validate_noise_amount(command_line_args.noise_level.unwrap_or(0)) + 1)
                 .min(10);
-        let wireframe_overlay = false;
+
+        let bounding_box_active = false;
+        let world_grid_active = !command_line_args.disable_world_grid;
         let cube_size = 1.0;
         let space_between_instances = 0.1;
         let transparency = 1.0;
@@ -110,7 +115,8 @@ impl Settings {
         log::debug!("Setting noise level to: {}", noise_amount);
 
         Settings {
-            wireframe_overlay,
+            bounding_box_active,
+            world_grid_active,
             domain_size,
             cube_size,
             space_between_instances,
@@ -130,8 +136,8 @@ impl Settings {
     }
 
     pub fn toggle_wireframe_overlay(&mut self) {
-        self.wireframe_overlay = !self.wireframe_overlay;
-        log::info!("Wireframe overlay set to: {}", self.wireframe_overlay);
+        self.bounding_box_active = !self.bounding_box_active;
+        log::info!("Wireframe overlay set to: {}", self.bounding_box_active);
     }
 
     pub fn toggle_pause_simulation(&mut self) {
@@ -378,7 +384,8 @@ impl InstanceManager {
     fn new(settings: &Settings) -> Self {
         let mut instance_manager = InstanceManager::default(settings);
         instance_manager.prepare_initial_instances(settings);
-        instance_manager.flatten();
+        // skipping scheduling to create a new buffer as it is handled externally
+        instance_manager.flatten(|| ());
         instance_manager
     }
 
@@ -470,32 +477,37 @@ impl InstanceManager {
         self.flattened.par_sort_by(|&i, &j| {
             let a_dist = (i.position - camera_position).magnitude();
             let b_dist = (j.position - camera_position).magnitude();
-            a_dist.partial_cmp(&b_dist).unwrap()
+            b_dist.partial_cmp(&a_dist).unwrap()
         });
         log::debug!("Time to sort: {:?}", start.elapsed());
     }
 
-    fn flatten(&mut self) {
-        // create new 3d instances vector with only alive instances
-        let mut temp_instances = Vec::new();
+    fn flatten<F: FnOnce()>(&mut self, schedule_create_new_buffer: F) {
+        let mut new_flattened = Vec::new();
         for x in 0..self.instances.len() {
             for y in 0..self.instances[x].len() {
                 for z in 0..self.instances[x][y].len() {
-                    if self.instances[x][y][z].instance_state.state == CellStateEnum::Alive {
-                        temp_instances.push(self.instances[x][y][z]);
+                    if self.instances[x][y][z].instance_state.state != CellStateEnum::Dead {
+                        new_flattened.push(self.instances[x][y][z]);
                     }
                 }
             }
         }
-        self.flattened = temp_instances;
+        let adjust_buffer_size_required =
+            self.check_if_new_buffer_needs_to_be_created(new_flattened.len());
+
+        if adjust_buffer_size_required {
+            schedule_create_new_buffer();
+        }
+        self.flattened = new_flattened;
     }
 
-    fn simulate(
-        &mut self,
-        settings: &mut Settings,
-        queue: &wgpu::Queue,
-        instance_buffer: &wgpu::Buffer,
-    ) {
+    /// Do this before Updating self.flattened or it will not work!!!
+    fn check_if_new_buffer_needs_to_be_created(&self, new_flattened_length: usize) -> bool {
+        self.flattened.len() < new_flattened_length
+    }
+
+    fn simulate(&mut self, settings: &mut Settings, update_queue: &mut UpdateQueue) {
         let instance_cache = self.instances.clone();
         let did_something = self
             .instances
@@ -575,8 +587,14 @@ impl InstanceManager {
             })
             .reduce(|| false, |a, b| a || b);
         if did_something {
-            self.flatten();
-            self.update_buffer(settings, queue, instance_buffer);
+            self.flatten(|| {
+                update_queue.add(UpdateEnum::SortInstances);
+                update_queue.add(UpdateEnum::CreateNewBuffer)
+            });
+            if update_queue.queue.last() != Some(&UpdateEnum::CreateNewBuffer) {
+                update_queue.add(UpdateEnum::SortInstances);
+                update_queue.add(UpdateEnum::UpdateBuffer);
+            }
         } else {
             log::warn!("Simulation has reached a stable state, pausing simulation");
             settings.simulation_paused = true;
@@ -624,25 +642,26 @@ impl InstanceManager {
         );
     }
 
-    fn update_transparency(&mut self, settings: &Settings) {
+    fn update_transparency(&mut self, settings: &Settings) -> bool {
         let mut new_flattened = Vec::new();
-        // go throughout the 3d instances and update the transparency then flatten the instances and update the buffer
         for layer in self.instances.iter_mut() {
             for row in layer.iter_mut() {
                 for instance in row.iter_mut() {
                     instance.color.w = settings.transparency;
-                    if instance.instance_state.state == CellStateEnum::Alive {
+                    if instance.instance_state.state != CellStateEnum::Dead {
                         new_flattened.push(*instance);
                     }
                 }
             }
         }
+        let adjust_buffer_size_required =
+            self.check_if_new_buffer_needs_to_be_created(new_flattened.len());
         self.flattened = new_flattened;
+        adjust_buffer_size_required
     }
 
-    fn update_space_between_instances(&mut self, settings: &Settings) {
+    fn update_space_between_instances(&mut self, settings: &Settings) -> bool {
         let mut new_flattened = Vec::new();
-        // go throughout the 3d instances and update the position then flatten the instances and update the buffer
         for (x, layer) in self.instances.iter_mut().enumerate() {
             for (y, row) in layer.iter_mut().enumerate() {
                 for (z, instance) in row.iter_mut().enumerate() {
@@ -653,23 +672,21 @@ impl InstanceManager {
                         y: iy,
                         z: iz,
                     };
-                    if instance.instance_state.state == CellStateEnum::Alive {
+                    if instance.instance_state.state != CellStateEnum::Dead {
                         new_flattened.push(*instance);
                     }
                 }
             }
         }
+        let adjust_buffer_size_required =
+            self.check_if_new_buffer_needs_to_be_created(new_flattened.len());
         self.flattened = new_flattened;
+        adjust_buffer_size_required
     }
 
-    fn increase_domain_size(
-        &mut self,
-        settings: &Settings,
-        device: &wgpu::Device,
-        camera: &Camera,
-    ) -> wgpu::Buffer {
+    fn increase_domain_size(&mut self, settings: &Settings, camera: &Camera) -> Option<UpdateEnum> {
         let mut new_instances: Vec<Vec<Vec<Instance>>> = Vec::new();
-
+        let mut return_update_enum = None;
         for x in 0..settings.domain_size {
             let mut y_instances: Vec<Vec<Instance>> = Vec::new();
             for y in 0..settings.domain_size {
@@ -698,19 +715,14 @@ impl InstanceManager {
             new_instances.push(y_instances);
         }
         self.instances = new_instances;
-        self.flatten();
+        self.flatten(|| return_update_enum = Some(UpdateEnum::CreateNewBuffer));
         self.sort_by_distance_to_camera(camera);
-        self.create_new_buffer(settings, device)
+        return_update_enum
     }
 
-    fn decrease_domain_size(
-        &mut self,
-        settings: &Settings,
-        device: &wgpu::Device,
-        camera: &Camera,
-    ) -> wgpu::Buffer {
+    fn decrease_domain_size(&mut self, settings: &Settings, camera: &Camera) -> Option<UpdateEnum> {
         let mut new_instances: Vec<Vec<Vec<Instance>>> = Vec::new();
-
+        let mut return_update_enum = None;
         // remove the outer layer of instances and keep the cube inside eg initially 12x12x12 then 10x10x10 remove 1 layer from each side
         for x in 1..settings.domain_size + 1 {
             let mut y_instances: Vec<Vec<Instance>> = Vec::new();
@@ -724,9 +736,9 @@ impl InstanceManager {
             new_instances.push(y_instances);
         }
         self.instances = new_instances;
-        self.flatten();
+        self.flatten(|| return_update_enum = Some(UpdateEnum::CreateNewBuffer));
         self.sort_by_distance_to_camera(camera);
-        self.create_new_buffer(settings, device)
+        return_update_enum
     }
 }
 
@@ -795,14 +807,14 @@ impl App {
         }
     }
 
-    fn simulation_update(&mut self, queue: &wgpu::Queue) {
+    fn simulation_update(&mut self) {
         if (self.settings.last_simulation_tick.elapsed().as_millis()
             >= self.settings.simulation_tick_rate.into())
             && !self.settings.simulation_paused
         {
             let start = std::time::Instant::now();
             self.instance_manager
-                .simulate(&mut self.settings, queue, &self.instance_buffer);
+                .simulate(&mut self.settings, &mut self.update_queue);
             self.settings.last_simulation_tick = std::time::Instant::now();
             log::debug!("Time to simulate: {:?}", start.elapsed());
         }
@@ -810,16 +822,25 @@ impl App {
 
     fn queue_update(&mut self, gpu_queue: &wgpu::Queue, device: &wgpu::Device) {
         let mut scheduled_updates = Vec::new();
+        if self.update_queue.queue.is_empty() {
+            return;
+        }
         for update in self.update_queue.queue.iter() {
             match update {
                 UpdateEnum::Transparency => {
-                    self.instance_manager.update_transparency(&self.settings);
+                    if self.instance_manager.update_transparency(&self.settings) {
+                        scheduled_updates.push(UpdateEnum::CreateNewBuffer);
+                    }
                     scheduled_updates.push(UpdateEnum::SortInstances);
                     scheduled_updates.push(UpdateEnum::UpdateBuffer);
                 }
                 UpdateEnum::SpaceBetweenInstances => {
-                    self.instance_manager
-                        .update_space_between_instances(&self.settings);
+                    if self
+                        .instance_manager
+                        .update_space_between_instances(&self.settings)
+                    {
+                        scheduled_updates.push(UpdateEnum::CreateNewBuffer);
+                    }
                     scheduled_updates.push(UpdateEnum::UpdateBoundingBox);
                     scheduled_updates.push(UpdateEnum::SortInstances);
                     scheduled_updates.push(UpdateEnum::UpdateBuffer);
@@ -830,19 +851,21 @@ impl App {
                     self.last_sort_camera = self.camera;
                 }
                 UpdateEnum::NumInstancesIncreased => {
-                    self.instance_buffer = self.instance_manager.increase_domain_size(
-                        &self.settings,
-                        device,
-                        &self.camera,
-                    );
+                    if let Some(update_enum) = self
+                        .instance_manager
+                        .increase_domain_size(&self.settings, &self.camera)
+                    {
+                        scheduled_updates.push(update_enum);
+                    };
                     scheduled_updates.push(UpdateEnum::UpdateBoundingBox);
                 }
                 UpdateEnum::NumInstancesDecreased => {
-                    self.instance_buffer = self.instance_manager.decrease_domain_size(
-                        &self.settings,
-                        device,
-                        &self.camera,
-                    );
+                    if let Some(update_enum) = self
+                        .instance_manager
+                        .decrease_domain_size(&self.settings, &self.camera)
+                    {
+                        scheduled_updates.push(update_enum);
+                    };
                     scheduled_updates.push(UpdateEnum::UpdateBoundingBox);
                 }
                 UpdateEnum::UpdateBoundingBox => {
@@ -863,6 +886,11 @@ impl App {
                         gpu_queue,
                         &self.instance_buffer,
                     );
+                }
+                UpdateEnum::CreateNewBuffer => {
+                    self.instance_buffer = self
+                        .instance_manager
+                        .create_new_buffer(&self.settings, device);
                 }
             }
         }
@@ -1242,6 +1270,7 @@ impl cellular_automata_3d::framework::App for App {
             } => {
                 self.camera_controller
                     .process_keyboard(logical_key.clone(), state);
+                // TODO: Limit how fast a user can spam the keys to avoid trying to access for e.g. self.instances before increase_num_instances has finished
                 if state == ElementState::Pressed {
                     if let Key::Character(s) = logical_key {
                         if s.as_str() == "p" {
@@ -1314,7 +1343,9 @@ impl cellular_automata_3d::framework::App for App {
         self.update_camera(dt, queue);
         self.transparency_update();
         self.queue_update(queue, device);
-        self.simulation_update(queue);
+        self.simulation_update();
+        // For any Scheduled updates
+        self.queue_update(queue, device);
     }
 
     fn resize(
@@ -1332,31 +1363,6 @@ impl cellular_automata_3d::framework::App for App {
     }
 
     fn render(&mut self, view: &wgpu::TextureView, device: &wgpu::Device, queue: &wgpu::Queue) {
-        let mut world_grid_encoder =
-            device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-        {
-            let mut render_pass =
-                world_grid_encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: None,
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view,
-                        resolve_target: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                            store: wgpu::StoreOp::Store,
-                        },
-                    })],
-                    depth_stencil_attachment: None,
-                    timestamp_writes: None,
-                    occlusion_query_set: None,
-                });
-            render_pass.set_pipeline(&self.world_grid_pipeline);
-            render_pass.set_vertex_buffer(0, self.world_grid_buffer.slice(..));
-            render_pass.set_bind_group(0, &self.bind_group, &[]);
-            render_pass.set_bind_group(1, &self.camera_bind_group, &[]);
-            render_pass.draw(0..self.world_grid_vertices.len() as u32, 0..1);
-        }
-
         let mut main_encoder =
             device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
         {
@@ -1397,44 +1403,73 @@ impl cellular_automata_3d::framework::App for App {
             render_pass.insert_debug_marker("Draw!");
         }
 
-        let mut world_grid_overlay_encoder =
-            device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-        {
-            let mut render_pass =
-                world_grid_overlay_encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: None,
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view,
-                        resolve_target: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Load,
-                            store: wgpu::StoreOp::Store,
-                        },
-                    })],
-                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                        view: &self.depth_texture.view,
-                        depth_ops: Some(wgpu::Operations {
-                            load: wgpu::LoadOp::Load,
-                            store: wgpu::StoreOp::Store,
+        if self.settings.world_grid_active {
+            let mut world_grid_encoder =
+                device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+            {
+                let mut render_pass =
+                    world_grid_encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: None,
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view,
+                            resolve_target: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                                store: wgpu::StoreOp::Store,
+                            },
+                        })],
+                        depth_stencil_attachment: None,
+                        timestamp_writes: None,
+                        occlusion_query_set: None,
+                    });
+                render_pass.set_pipeline(&self.world_grid_pipeline);
+                render_pass.set_vertex_buffer(0, self.world_grid_buffer.slice(..));
+                render_pass.set_bind_group(0, &self.bind_group, &[]);
+                render_pass.set_bind_group(1, &self.camera_bind_group, &[]);
+                render_pass.draw(0..self.world_grid_vertices.len() as u32, 0..1);
+            }
+
+            let mut world_grid_2nd_pass_encoder =
+                device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+            {
+                let mut render_pass =
+                    world_grid_2nd_pass_encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: None,
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view,
+                            resolve_target: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Load,
+                                store: wgpu::StoreOp::Store,
+                            },
+                        })],
+                        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                            view: &self.depth_texture.view,
+                            depth_ops: Some(wgpu::Operations {
+                                load: wgpu::LoadOp::Load,
+                                store: wgpu::StoreOp::Store,
+                            }),
+                            stencil_ops: None,
                         }),
-                        stencil_ops: None,
-                    }),
-                    timestamp_writes: None,
-                    occlusion_query_set: None,
-                });
-            render_pass.set_pipeline(&self.world_grid_pipeline_depth);
-            render_pass.set_vertex_buffer(0, self.world_grid_buffer.slice(..));
-            render_pass.set_bind_group(0, &self.bind_group, &[]);
-            render_pass.set_bind_group(1, &self.camera_bind_group, &[]);
-            render_pass.draw(0..self.world_grid_vertices.len() as u32, 0..1);
+                        timestamp_writes: None,
+                        occlusion_query_set: None,
+                    });
+                render_pass.set_pipeline(&self.world_grid_pipeline_depth);
+                render_pass.set_vertex_buffer(0, self.world_grid_buffer.slice(..));
+                render_pass.set_bind_group(0, &self.bind_group, &[]);
+                render_pass.set_bind_group(1, &self.camera_bind_group, &[]);
+                render_pass.draw(0..self.world_grid_vertices.len() as u32, 0..1);
+            }
+
+            queue.submit(Some(world_grid_encoder.finish()));
+            queue.submit(Some(main_encoder.finish()));
+            queue.submit(Some(world_grid_2nd_pass_encoder.finish()));
+        } else {
+            queue.submit(Some(main_encoder.finish()));
         }
 
-        queue.submit(Some(world_grid_encoder.finish()));
-        queue.submit(Some(main_encoder.finish()));
-        queue.submit(Some(world_grid_overlay_encoder.finish()));
-
         if let Some(ref pipeline_wire) = self.pipeline_wire {
-            if self.settings.wireframe_overlay {
+            if self.settings.bounding_box_active {
                 let mut encoder =
                     device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
                 {

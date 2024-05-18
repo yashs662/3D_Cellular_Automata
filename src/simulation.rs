@@ -1,5 +1,3 @@
-use std::fmt::{Display, Formatter};
-
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum NeighborMethod {
     /// 26 neighbors
@@ -69,16 +67,6 @@ impl CellStateEnum {
             CellStateEnum::Alive => 1,
             CellStateEnum::Fading => 2,
             CellStateEnum::Dead => 0,
-        }
-    }
-}
-
-impl Display for CellStateEnum {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        match self {
-            CellStateEnum::Alive => write!(f, "Alive"),
-            CellStateEnum::Fading => write!(f, "Fading"),
-            CellStateEnum::Dead => write!(f, "Dead"),
         }
     }
 }

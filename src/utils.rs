@@ -22,7 +22,7 @@ pub fn init_logger(debug_mode: bool) {
 #[command(
     version,
     about,
-    long_about = "A 3D cellular automata simulation using wgpu."
+    long_about = "A 3D cellular automata simulation using wgpu. To use any of the aliases make sure to use them with the long flag. Example: --dwg and not -dwg.",
 )]
 #[derive(Default)]
 pub struct CommandLineArgs {
@@ -52,6 +52,9 @@ pub struct CommandLineArgs {
     /// This will set the initial spawn size for the simulation which is less than or equal to the size of the simulation.
     #[arg(short, long)]
     pub initial_spawn_size: Option<u8>,
+    /// Disable world Grid
+    #[arg(short = 'w', long, visible_alias = "dwg")]
+    pub disable_world_grid: bool,
 }
 
 pub struct Validator;
