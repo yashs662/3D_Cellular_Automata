@@ -8,7 +8,7 @@ use winit::{
     window::Window,
 };
 
-use crate::simulation::SimulationRules;
+use crate::utils::CommandLineArgs;
 
 pub trait App: 'static + Sized {
     const SRGB: bool = true;
@@ -37,7 +37,7 @@ pub trait App: 'static + Sized {
         config: &wgpu::SurfaceConfiguration,
         adapter: &wgpu::Adapter,
         device: &wgpu::Device,
-        simulation_rules: &SimulationRules,
+        command_line_args: &CommandLineArgs,
     ) -> Self;
 
     fn resize(
@@ -306,7 +306,7 @@ impl FrameCounter {
     }
 }
 
-async fn start<E: App>(title: &str, simulation_rules: SimulationRules) {
+async fn start<E: App>(title: &str, command_line_args: CommandLineArgs) {
     let window_loop = EventLoopWrapper::new(title);
     let mut surface = SurfaceWrapper::new();
     let context = AppContext::init_async::<E>(&mut surface, window_loop.window.clone()).await;
@@ -329,7 +329,7 @@ async fn start<E: App>(title: &str, simulation_rules: SimulationRules) {
                             surface.config(),
                             &context.adapter,
                             &context.device,
-                            &simulation_rules
+                            &command_line_args
                         ));
                     }
                 }
@@ -412,6 +412,6 @@ async fn start<E: App>(title: &str, simulation_rules: SimulationRules) {
     log::info!("Event loop ended with result {:?}", loop_result);
 }
 
-pub fn run<E: App>(title: &'static str, simulation_rules: SimulationRules) {
-    pollster::block_on(start::<E>(title, simulation_rules));
+pub fn run<E: App>(title: &'static str, command_line_args: CommandLineArgs) {
+    pollster::block_on(start::<E>(title, command_line_args));
 }

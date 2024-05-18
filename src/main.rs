@@ -2,20 +2,16 @@ use bytemuck::{Pod, Zeroable};
 use cellular_automata_3d::{
     camera::{setup_camera, Camera, CameraController, CameraUniform, Projection},
     constants::DEPTH_FORMAT,
-    simulation::{NeighborMethod, SimulationRules},
+    simulation::{CellState, CellStateEnum, SimulationRules},
     texture::{self, Texture},
+    utils::{init_logger, CommandLineArgs, Validator},
+    vertex::Vertex,
 };
 use cgmath::{EuclideanSpace, InnerSpace, Rotation3};
-use clap::{command, Parser};
-use rand::Rng;
+use clap::Parser;
+use rand::{rngs::ThreadRng, Rng};
 use rayon::prelude::*;
-use std::{
-    borrow::Cow,
-    f32::consts,
-    fmt::{Display, Formatter},
-    mem,
-    sync::{Arc, Mutex},
-};
+use std::{borrow::Cow, f32::consts, mem};
 use wgpu::{util::DeviceExt, PipelineCompilationOptions};
 use winit::{
     event::{DeviceEvent, ElementState, KeyEvent, MouseButton, WindowEvent},
@@ -38,6 +34,10 @@ impl UpdateQueue {
     fn reset(&mut self) {
         self.queue.clear();
     }
+
+    fn schedule_updates(&mut self, new_updates: Vec<UpdateEnum>) {
+        self.queue.extend(new_updates);
+    }
 }
 
 enum UpdateEnum {
@@ -46,11 +46,13 @@ enum UpdateEnum {
     NumInstancesDecreased,
     SpaceBetweenInstances,
     SortInstances,
+    UpdateBoundingBox,
+    UpdateBuffer,
 }
 
 pub struct Settings {
     wireframe_overlay: bool,
-    num_instances_per_row: u32,
+    domain_size: u32,
     cube_size: f32,
     space_between_instances: f32,
     transparency: f32,
@@ -58,63 +60,72 @@ pub struct Settings {
     transparency_step_size: f32,
     space_between_step_size: f32,
     angle_threshold_for_sort: f32,
-    fade_time: f32,
+    translation_threshold_for_sort: f32,
     simulation_tick_rate: u16,
     last_simulation_tick: std::time::Instant,
-    neighbor_method: NeighborMethod,
-    spawn_size: u32,
+    spawn_size: u8,
     noise_amount: u8,
     simulation_rules: SimulationRules,
+    simulation_paused: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self::new(SimulationRules::default())
+        Self::new(CommandLineArgs::default())
     }
 }
 
 impl Settings {
-    pub fn new(simulation_rules: SimulationRules) -> Self {
+    pub fn new(command_line_args: CommandLineArgs) -> Self {
+        let simulation_rules = SimulationRules::parse_rules(command_line_args.rules.as_deref());
+        let simulation_tick_rate = Validator::validate_simulation_tick_rate(
+            command_line_args.simulation_tick_rate.unwrap_or(10),
+        );
+        let domain_size =
+            Validator::validate_domain_size(command_line_args.domain_size.unwrap_or(20));
+        let spawn_size = Validator::validate_spawn_size(
+            command_line_args.initial_spawn_size.unwrap_or(10),
+            domain_size as u8,
+        );
+        // Add 1 to avoid no noise on setting noise to 1 as it will calculate random offset from 0 to 1
+        // which is not visible in the grid, hence we need at least 2 to see the noise
+        let noise_amount =
+            (Validator::validate_noise_amount(command_line_args.noise_level.unwrap_or(5)) + 1)
+                .min(10);
         let wireframe_overlay = false;
-        let num_instances_per_row = 20;
-        let spawn_size = 10;
         let cube_size = 1.0;
-        let space_between_instances = (cube_size * 2.0) + 0.1;
+        let space_between_instances = 0.1;
+        let transparency = 1.0;
+        let num_instances_step_size = 2;
+        let transparency_step_size = 0.1;
+        let space_between_step_size = 0.05;
+        let angle_threshold_for_sort = 0.10;
+        let translation_threshold_for_sort = 10.0;
+        let last_simulation_tick = std::time::Instant::now();
+        let simulation_paused = true; // Start simulation paused
 
-        // make sure spawn size is even and not more than the number of instances per row
-        let spawn_size = if spawn_size % 2 == 0 {
-            spawn_size
-        } else {
-            log::warn!("Spawn size must be even, setting to: {}", spawn_size + 1);
-            spawn_size + 1
-        };
-        let spawn_size = if spawn_size > num_instances_per_row {
-            log::warn!(
-                "Spawn size cannot be more than the number of instances per row, setting to: {}",
-                num_instances_per_row
-            );
-            num_instances_per_row
-        } else {
-            spawn_size
-        };
+        log::info!("Setting simulation tick rate to: {}", simulation_tick_rate);
+        log::info!("Setting domain size to: {}", domain_size);
+        log::info!("Setting initial spawn size to: {}", spawn_size);
+        log::info!("Setting noise level to: {}", noise_amount);
 
         Settings {
             wireframe_overlay,
-            num_instances_per_row,
+            domain_size,
             cube_size,
             space_between_instances,
-            transparency: 0.2,
-            num_instances_step_size: 2,
-            transparency_step_size: 0.1,
-            space_between_step_size: 0.05,
-            angle_threshold_for_sort: 0.10,
-            fade_time: 2.0,
-            simulation_tick_rate: 10,
-            last_simulation_tick: std::time::Instant::now(),
-            neighbor_method: NeighborMethod::Moore,
+            transparency,
+            num_instances_step_size,
+            transparency_step_size,
+            space_between_step_size,
+            angle_threshold_for_sort,
+            translation_threshold_for_sort,
+            simulation_tick_rate,
+            last_simulation_tick,
             spawn_size,
-            noise_amount: 1,
+            noise_amount,
             simulation_rules,
+            simulation_paused,
         }
     }
 
@@ -123,47 +134,35 @@ impl Settings {
         log::info!("Wireframe overlay set to: {}", self.wireframe_overlay);
     }
 
-    pub fn set_num_instances_per_row(
-        &mut self,
-        num_instances_per_row: u32,
-        update_queue: &mut UpdateQueue,
-    ) {
-        if num_instances_per_row < 2 {
-            log::error!("Number of instances per row cannot be less than 2");
-            self.num_instances_per_row = 2;
-        } else if num_instances_per_row > 100 {
-            log::error!("Number of instances per row cannot be more than 100");
-            self.num_instances_per_row = 100;
+    pub fn toggle_pause_simulation(&mut self) {
+        self.simulation_paused = !self.simulation_paused;
+        if self.simulation_paused {
+            log::info!("Simulation paused");
         } else {
-            match num_instances_per_row.cmp(&self.num_instances_per_row) {
-                std::cmp::Ordering::Less => {
-                    update_queue.add(UpdateEnum::NumInstancesDecreased);
-                }
-                std::cmp::Ordering::Greater => {
-                    update_queue.add(UpdateEnum::NumInstancesIncreased);
-                }
-                std::cmp::Ordering::Equal => {
-                    // No change
-                }
-            }
-            self.num_instances_per_row = num_instances_per_row;
-            log::info!(
-                "Number of instances per row set to: {}",
-                self.num_instances_per_row
-            );
+            log::info!("Simulation resumed");
         }
     }
 
-    pub fn set_transparency(&mut self, transparency: f32, update_queue: &mut UpdateQueue) {
-        if transparency < 0.0 {
-            log::error!("Transparency cannot be less than 0.0");
-            self.transparency = 0.0;
-        } else if transparency > 1.0 {
-            log::error!("Transparency cannot be more than 1.0");
-            self.transparency = 1.0;
-        } else {
-            self.transparency = (transparency * 10.0).round() / 10.0;
+    pub fn set_domain_size(&mut self, domain_size: u32, update_queue: &mut UpdateQueue) {
+        let validated_domain_size = Validator::validate_domain_size(domain_size);
+
+        match validated_domain_size.cmp(&self.domain_size) {
+            std::cmp::Ordering::Less => {
+                update_queue.add(UpdateEnum::NumInstancesDecreased);
+            }
+            std::cmp::Ordering::Greater => {
+                update_queue.add(UpdateEnum::NumInstancesIncreased);
+            }
+            std::cmp::Ordering::Equal => {
+                // No change
+            }
         }
+        self.domain_size = validated_domain_size;
+        log::info!("Domain size set to: {}", self.domain_size);
+    }
+
+    pub fn set_transparency(&mut self, transparency: f32, update_queue: &mut UpdateQueue) {
+        self.transparency = Validator::validate_transparency(transparency);
         log::info!("Transparency set to: {}", self.transparency);
         update_queue.add(UpdateEnum::Transparency);
     }
@@ -173,87 +172,14 @@ impl Settings {
         space_between_instances: f32,
         update_queue: &mut UpdateQueue,
     ) {
-        if space_between_instances < (self.cube_size * 2.0) {
-            log::error!("Space between instances cannot be less than 0.0");
-            // add a very small value to avoid overlapping instances
-            self.space_between_instances = (self.cube_size * 2.0) + 0.001;
-        } else if space_between_instances > ((self.cube_size * 2.0) + 10.0) {
-            log::error!("Space between instances cannot be more than 10.0");
-            self.space_between_instances = (self.cube_size * 2.0) + 10.0;
-        } else {
-            self.space_between_instances = (space_between_instances * 100.0).round() / 100.0;
-        }
+        self.space_between_instances =
+            Validator::validate_space_between_instances(space_between_instances);
         log::info!(
             "Space between instances set to: {}",
-            ((self.space_between_instances - (self.cube_size * 2.0)) * 100.0).round() / 100.0
+            (self.space_between_instances * 100.0).round() / 100.0
         );
         update_queue.add(UpdateEnum::SpaceBetweenInstances);
     }
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct Vertex {
-    position: [f32; 4],
-    texture_coord: [f32; 2],
-}
-
-unsafe impl Pod for Vertex {}
-unsafe impl Zeroable for Vertex {}
-
-impl Vertex {
-    fn desc() -> wgpu::VertexBufferLayout<'static> {
-        wgpu::VertexBufferLayout {
-            array_stride: mem::size_of::<Vertex>() as wgpu::BufferAddress,
-            step_mode: wgpu::VertexStepMode::Vertex,
-            attributes: &[wgpu::VertexAttribute {
-                offset: 0,
-                shader_location: 0,
-                format: wgpu::VertexFormat::Float32x3,
-            }],
-        }
-    }
-
-    fn new(pos: [f32; 3], tc: [f32; 2]) -> Vertex {
-        Vertex {
-            position: [pos[0], pos[1], pos[2], 1.0],
-            texture_coord: [tc[0], tc[1]],
-        }
-    }
-}
-
-#[derive(Clone, Copy, Default, Debug, PartialEq)]
-enum CellStateEnum {
-    #[default]
-    Alive,
-    Fading,
-    Dead,
-}
-
-impl CellStateEnum {
-    fn to_int(self) -> u8 {
-        match self {
-            CellStateEnum::Alive => 1,
-            CellStateEnum::Fading => 2,
-            CellStateEnum::Dead => 0,
-        }
-    }
-}
-
-impl Display for CellStateEnum {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        match self {
-            CellStateEnum::Alive => write!(f, "Alive"),
-            CellStateEnum::Fading => write!(f, "Fading"),
-            CellStateEnum::Dead => write!(f, "Dead"),
-        }
-    }
-}
-
-#[derive(Clone, Copy, Default, Debug, PartialEq)]
-struct CellState {
-    state: CellStateEnum,
-    killed_at: Option<std::time::Instant>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -265,20 +191,32 @@ struct Instance {
 }
 
 impl Instance {
-    fn to_raw(self, fade_time: f32, current_transparency_setting: f32) -> InstanceRaw {
+    fn to_raw(self, settings: &Settings) -> InstanceRaw {
         let transform =
             cgmath::Matrix4::from_translation(self.position) * cgmath::Matrix4::from(self.rotation);
         InstanceRaw {
             transform: transform.into(),
             color: self.color.into(),
             instance_state: self.instance_state.state.to_int() as f32,
-            instance_death_transparency: self.instance_state.killed_at.map_or(
-                current_transparency_setting,
-                |t| {
-                    ((fade_time - t.elapsed().as_secs_f32()) / fade_time)
-                        * current_transparency_setting
-                },
-            ),
+            instance_death_transparency: if settings.simulation_rules.num_states > 2 {
+                if self.instance_state.state == CellStateEnum::Fading {
+                    if self.instance_state.fade_level == 0 {
+                        settings.transparency
+                    } else if self.instance_state.fade_level
+                        == settings.simulation_rules.num_states - 1
+                    {
+                        0.0
+                    } else {
+                        settings.transparency
+                            - (self.instance_state.fade_level as f32
+                                / (settings.simulation_rules.num_states - 1) as f32)
+                    }
+                } else {
+                    settings.transparency
+                }
+            } else {
+                settings.transparency
+            },
         }
     }
 
@@ -288,14 +226,12 @@ impl Instance {
         let rotation =
             cgmath::Quaternion::from_axis_angle(cgmath::Vector3::unit_z(), cgmath::Deg(0.0));
 
-        // give a color based on position
+        // TODO: use a Color Strategy pattern to determine the color
+        // give colors based on position
         let color = cgmath::Vector4 {
-            x: (x + settings.space_between_instances)
-                / (settings.space_between_instances * settings.num_instances_per_row as f32),
-            y: (y + settings.space_between_instances)
-                / (settings.space_between_instances * settings.num_instances_per_row as f32),
-            z: (z + settings.space_between_instances)
-                / (settings.space_between_instances * settings.num_instances_per_row as f32),
+            x: (x + settings.domain_size as f32) / (settings.domain_size as f32 * 2.0),
+            y: (y + settings.domain_size as f32) / (settings.domain_size as f32 * 2.0),
+            z: (z + settings.domain_size as f32) / (settings.domain_size as f32 * 2.0),
             w: settings.transparency,
         };
 
@@ -307,18 +243,18 @@ impl Instance {
         }
     }
 
-    fn create_dead_instance_at_pos(x: f32, y: f32, z: f32) -> Instance {
+    fn create_dead_instance_at_pos(settings: &Settings, x: f32, y: f32, z: f32) -> Instance {
         let position = cgmath::Vector3 { x, y, z };
 
         let rotation =
             cgmath::Quaternion::from_axis_angle(cgmath::Vector3::unit_z(), cgmath::Deg(0.0));
 
-        // give a color based on position
+        // give colors based on position
         let color = cgmath::Vector4 {
-            x: 0.0,
-            y: 0.0,
-            z: 0.0,
-            w: 0.0,
+            x: (x + settings.domain_size as f32) / (settings.domain_size as f32 * 2.0),
+            y: (y + settings.domain_size as f32) / (settings.domain_size as f32 * 2.0),
+            z: (z + settings.domain_size as f32) / (settings.domain_size as f32 * 2.0),
+            w: settings.transparency,
         };
 
         Instance {
@@ -327,9 +263,41 @@ impl Instance {
             color,
             instance_state: CellState {
                 state: CellStateEnum::Dead,
-                killed_at: None,
+                fade_level: 0,
             },
         }
+    }
+
+    fn create_bounding_box(settings: &Settings) -> Instance {
+        Instance::create_dead_instance_at_pos(
+            settings,
+            -settings.space_between_instances,
+            -settings.space_between_instances,
+            -settings.space_between_instances,
+        )
+    }
+
+    fn calculate_bounding_box_size(settings: &Settings) -> f32 {
+        (settings.cube_size as f64
+            + ((settings.space_between_instances as f64 + (settings.cube_size * 2.0) as f64)
+                * (settings.domain_size as f64 / 2.0))) as f32
+    }
+
+    // Not required anymore but keeping it for reference
+    // fn convert_3d_to_flattened_index(x: u32, y: u32, z: u32, domain_size: u32) -> usize {
+    //     ((x * domain_size.pow(2)) + (y * domain_size) + z) as usize
+    // }
+
+    fn scale_x_y_z(x: u32, y: u32, z: u32, settings: &Settings) -> (f32, f32, f32) {
+        let total_domain_size =
+            Self::calculate_bounding_box_size(settings) - (settings.cube_size * 2.0);
+        let x_scaled = x as f32 * (settings.cube_size * 2.0 + settings.space_between_instances)
+            - total_domain_size;
+        let y_scaled = y as f32 * (settings.cube_size * 2.0 + settings.space_between_instances)
+            - total_domain_size;
+        let z_scaled = z as f32 * (settings.cube_size * 2.0 + settings.space_between_instances)
+            - total_domain_size;
+        (x_scaled, y_scaled, z_scaled)
     }
 }
 
@@ -395,41 +363,88 @@ impl InstanceRaw {
 struct InstanceManager {
     instances: Vec<Vec<Vec<Instance>>>,
     flattened: Vec<Instance>,
-    sort_map: Vec<usize>,
+    bounding_box_instance: Instance,
 }
 
 impl InstanceManager {
-    fn prepare_initial_instances(settings: &Settings) -> InstanceManager {
-        let mut rng = rand::thread_rng();
-        let instances: Vec<Vec<Vec<Instance>>> = (0..settings.num_instances_per_row)
+    fn default(settings: &Settings) -> Self {
+        InstanceManager {
+            instances: Vec::new(),
+            flattened: Vec::new(),
+            bounding_box_instance: Instance::create_bounding_box(settings),
+        }
+    }
+
+    fn new(settings: &Settings) -> Self {
+        let mut instance_manager = InstanceManager::default(settings);
+        instance_manager.prepare_initial_instances(settings);
+        instance_manager.flatten();
+        // log the position of the first and last instance in self.flatten
+        log::info!(
+            "First instance position: {:?}",
+            instance_manager.flattened.first().unwrap().position
+        );
+        log::info!(
+            "Last instance position: {:?}",
+            instance_manager.flattened.last().unwrap().position
+        );
+        instance_manager
+    }
+
+    fn generate_offset(&self, rng: &mut ThreadRng, settings: &Settings) -> f32 {
+        if settings.noise_amount > 0 {
+            let rand_offset = rng.gen_range(0..settings.noise_amount);
+            if rand::random::<f32>() > 0.5 {
+                rand_offset as f32
+            } else {
+                rand_offset as f32 * -1.0
+            }
+        } else {
+            0.0
+        }
+    }
+
+    fn spawn_condition(&self, pos: f32, offset: f32, half_total: f32, half_spawn: f32) -> bool {
+        (pos >= (half_total - half_spawn + offset)) && (pos < (half_total + half_spawn + offset))
+    }
+
+    fn prepare_initial_instances(&mut self, settings: &Settings) {
+        let half_total = settings.domain_size as f32 / 2.0;
+        let half_spawn = settings.spawn_size as f32 / 2.0;
+        let mut rng: ThreadRng = rand::thread_rng();
+        self.instances = (0..settings.domain_size)
             .map(|x| {
-                (0..settings.num_instances_per_row)
+                (0..settings.domain_size)
                     .map(|y| {
-                        (0..settings.num_instances_per_row)
+                        (0..settings.domain_size)
                             .map(|z| {
-                                let rand_offset = rng.gen_range(0..settings.noise_amount);
-                                let rand_offset = if rand::random::<f32>() > 0.5 {
-                                    rand_offset as f32
-                                } else {
-                                    rand_offset as f32 * -1.0
-                                };
-                                let half_total = settings.num_instances_per_row as f32 / 2.0;
-                                let half_spawn = settings.spawn_size as f32 / 2.0;
-                                let x_scaled = x as f32 * settings.space_between_instances;
-                                let y_scaled = y as f32 * settings.space_between_instances;
-                                let z_scaled = z as f32 * settings.space_between_instances;
-                                if ((x as f32) < half_total - half_spawn + rand_offset)
-                                    || ((x as f32) >= half_total + half_spawn + rand_offset)
-                                    || ((y as f32) < half_total - half_spawn + rand_offset)
-                                    || ((y as f32) >= half_total + half_spawn + rand_offset)
-                                    || ((z as f32) < half_total - half_spawn + rand_offset)
-                                    || ((z as f32) >= half_total + half_spawn + rand_offset)
-                                {
-                                    Instance::create_dead_instance_at_pos(
-                                        x_scaled, y_scaled, z_scaled,
+                                let x_rand_offset = self.generate_offset(&mut rng, settings);
+                                let y_rand_offset = self.generate_offset(&mut rng, settings);
+                                let z_rand_offset = self.generate_offset(&mut rng, settings);
+                                let (x_scaled, y_scaled, z_scaled) =
+                                    Instance::scale_x_y_z(x, y, z, settings);
+                                // randomize the spawn conditions to create a random initial state
+                                if self.spawn_condition(
+                                    x as f32,
+                                    x_rand_offset,
+                                    half_total,
+                                    half_spawn,
+                                ) && self.spawn_condition(
+                                    y as f32,
+                                    y_rand_offset,
+                                    half_total,
+                                    half_spawn,
+                                ) && self.spawn_condition(
+                                    z as f32,
+                                    z_rand_offset,
+                                    half_total,
+                                    half_spawn,
+                                ) {
+                                    Instance::create_instance_at_pos(
+                                        settings, x_scaled, y_scaled, z_scaled,
                                     )
                                 } else {
-                                    Instance::create_instance_at_pos(
+                                    Instance::create_dead_instance_at_pos(
                                         settings, x_scaled, y_scaled, z_scaled,
                                     )
                                 }
@@ -439,18 +454,12 @@ impl InstanceManager {
                     .collect()
             })
             .collect();
-        let flattened = instances.iter().flatten().flatten().cloned().collect();
-        InstanceManager {
-            instances,
-            flattened,
-            sort_map: Vec::new(),
-        }
     }
 
     fn prepare_raw_instance_data(&self, settings: &Settings) -> Vec<InstanceRaw> {
         self.flattened
             .iter()
-            .map(|instance| Instance::to_raw(*instance, settings.fade_time, settings.transparency))
+            .map(|instance| Instance::to_raw(*instance, settings))
             .collect::<Vec<_>>()
     }
 
@@ -467,75 +476,65 @@ impl InstanceManager {
         let start = std::time::Instant::now();
         let camera_position = camera.position.to_vec();
 
-        if self.sort_map.is_empty() {
-            self.sort_map = (0..self.flattened.len()).collect();
-        } else if self.sort_map.len() > self.flattened.len() {
-            // we have reduced the number of instances
-            self.sort_map = (0..self.flattened.len()).collect();
-        } else if self.sort_map.len() < self.flattened.len() {
-            // we have increased the number of instances
-            self.sort_map
-                .extend(self.sort_map.len()..self.flattened.len());
-        }
-
-        self.sort_map.sort_by(|&i, &j| {
-            let a_dist = (self.flattened[i].position - camera_position).magnitude();
-            let b_dist = (self.flattened[j].position - camera_position).magnitude();
-            b_dist.partial_cmp(&a_dist).unwrap()
+        self.flattened.par_sort_by(|&i, &j| {
+            let a_dist = (i.position - camera_position).magnitude();
+            let b_dist = (j.position - camera_position).magnitude();
+            a_dist.partial_cmp(&b_dist).unwrap()
         });
-        self.flattened = self.sort_map.iter().map(|&i| self.flattened[i]).collect();
-        log::info!("Time to sort: {:?}", start.elapsed());
+        log::debug!("Time to sort: {:?}", start.elapsed());
     }
 
     fn flatten(&mut self) {
-        self.flattened = self.instances.iter().flatten().flatten().cloned().collect();
+        // create new 3d instances vector with only alive instances
+        let mut temp_instances = Vec::new();
+        for x in 0..self.instances.len() {
+            for y in 0..self.instances[x].len() {
+                for z in 0..self.instances[x][y].len() {
+                    if self.instances[x][y][z].instance_state.state == CellStateEnum::Alive {
+                        temp_instances.push(self.instances[x][y][z]);
+                    }
+                }
+            }
+        }
+        self.flattened = temp_instances;
     }
 
     fn simulate(
         &mut self,
-        settings: &Settings,
+        settings: &mut Settings,
         queue: &wgpu::Queue,
         instance_buffer: &wgpu::Buffer,
     ) {
-        if self.sort_map.is_empty() {
-            log::error!("Sort map is empty");
-            return;
-        }
-        let flattened = Arc::new(Mutex::new(self.flattened.clone()));
-        self.instances
+        let instance_cache = self.instances.clone();
+        let did_something = self
+            .instances
             .par_iter_mut()
             .enumerate()
-            .for_each(|(z, layer)| {
+            .map(|(x, layer)| {
+                let mut thread_did_something = false;
                 for (y, row) in layer.iter_mut().enumerate() {
-                    for (x, instance) in row.iter_mut().enumerate() {
+                    for (z, instance) in row.iter_mut().enumerate() {
                         let mut alive_neighbors = 0;
-                        let neighbors = settings.neighbor_method.get_neighbor_iter();
+                        let neighbors = settings
+                            .simulation_rules
+                            .neighbor_method
+                            .get_neighbor_iter();
                         for (dx, dy, dz) in neighbors {
-                            let x = x as i32 + dx;
-                            let y = y as i32 + dy;
-                            let z = z as i32 + dz;
-                            if x < 0
-                                || y < 0
-                                || z < 0
-                                || x >= settings.num_instances_per_row as i32
-                                || y >= settings.num_instances_per_row as i32
-                                || z >= settings.num_instances_per_row as i32
-                            {
-                                continue;
-                            }
-                            let index = (z * settings.num_instances_per_row.pow(2) as i32)
-                                + (y * settings.num_instances_per_row as i32)
-                                + x;
-                            let neighbor = &self.flattened[index as usize];
+                            let ix = ((x as i32 + dx) % settings.domain_size as i32
+                                + settings.domain_size as i32)
+                                % settings.domain_size as i32;
+                            let iy = ((y as i32 + dy) % settings.domain_size as i32
+                                + settings.domain_size as i32)
+                                % settings.domain_size as i32;
+                            let iz = ((z as i32 + dz) % settings.domain_size as i32
+                                + settings.domain_size as i32)
+                                % settings.domain_size as i32;
+
+                            let neighbor = &instance_cache[ix as usize][iy as usize][iz as usize];
                             if neighbor.instance_state.state == CellStateEnum::Alive {
                                 alive_neighbors += 1;
                             }
                         }
-                        let index = (z as i32 * settings.num_instances_per_row.pow(2) as i32)
-                            + (y as i32 * settings.num_instances_per_row as i32)
-                            + x as i32;
-                        let sorted_index = self.sort_map[index as usize];
-                        let flattened_instance = &mut flattened.lock().unwrap()[sorted_index];
 
                         match instance.instance_state.state {
                             CellStateEnum::Alive => {
@@ -544,41 +543,53 @@ impl InstanceManager {
                                     .survival
                                     .contains(&alive_neighbors)
                                 {
-                                    instance.instance_state.state = CellStateEnum::Dead;
-                                    instance.instance_state.killed_at =
-                                        Some(std::time::Instant::now());
-                                    flattened_instance.instance_state.state = CellStateEnum::Dead;
-                                    flattened_instance.instance_state.killed_at =
-                                        Some(std::time::Instant::now());
+                                    if settings.simulation_rules.num_states > 2 {
+                                        instance.instance_state.state = CellStateEnum::Fading;
+                                    } else {
+                                        instance.instance_state.state = CellStateEnum::Dead;
+                                    }
+                                    thread_did_something = true;
                                 }
                             }
                             CellStateEnum::Fading => {
-                                if settings.simulation_rules.birth.contains(&alive_neighbors) {
-                                    instance.instance_state.state = CellStateEnum::Alive;
-                                    instance.instance_state.killed_at = None;
-                                    flattened_instance.instance_state.state = CellStateEnum::Alive;
-                                    flattened_instance.instance_state.killed_at = None;
-                                } else if instance.instance_state.killed_at.map_or(false, |t| {
-                                    t.elapsed().as_secs_f32() >= settings.fade_time
-                                }) {
+                                // TODO: Decide if Fading cells should be able to come back to life
+                                // if settings.simulation_rules.birth.contains(&alive_neighbors) {
+                                //     instance.instance_state.state = CellStateEnum::Alive;
+                                //     instance.instance_state.fade_level = 0;
+                                //     flattened_instance.instance_state.state = CellStateEnum::Alive;
+                                //     flattened_instance.instance_state.fade_level = 0;
+                                // } else
+                                if instance.instance_state.fade_level
+                                    >= settings.simulation_rules.num_states
+                                {
                                     instance.instance_state.state = CellStateEnum::Dead;
-                                    flattened_instance.instance_state.state = CellStateEnum::Dead;
+                                } else if instance.instance_state.fade_level
+                                    < settings.simulation_rules.num_states
+                                {
+                                    instance.instance_state.fade_level += 1;
                                 }
+                                thread_did_something = true;
                             }
                             CellStateEnum::Dead => {
                                 if settings.simulation_rules.birth.contains(&alive_neighbors) {
                                     instance.instance_state.state = CellStateEnum::Alive;
-                                    instance.instance_state.killed_at = None;
-                                    flattened_instance.instance_state.state = CellStateEnum::Alive;
-                                    flattened_instance.instance_state.killed_at = None;
+                                    instance.instance_state.fade_level = 0;
+                                    thread_did_something = true;
                                 }
                             }
                         }
                     }
                 }
-            });
-        self.flattened.clone_from(&flattened.lock().unwrap());
-        self.update_buffer(settings, queue, instance_buffer);
+                thread_did_something
+            })
+            .reduce(|| false, |a, b| a || b);
+        if did_something {
+            self.flatten();
+            self.update_buffer(settings, queue, instance_buffer);
+        } else {
+            log::info!("Simulation has reached a stable state, pausing simulation");
+            settings.simulation_paused = true;
+        }
     }
 
     fn update_buffer(
@@ -592,69 +603,75 @@ impl InstanceManager {
         queue.write_buffer(instance_buffer, 0, bytemuck::cast_slice(&instance_data));
     }
 
-    fn update_transparency(
-        &mut self,
+    fn update_bounding_box_instance_buffer(
+        &self,
         settings: &Settings,
         queue: &wgpu::Queue,
-        instance_buffer: &wgpu::Buffer,
+        bounding_box_instance_buffer: &wgpu::Buffer,
     ) {
+        let instance_data = vec![self.bounding_box_instance.to_raw(settings)];
+        queue.write_buffer(
+            bounding_box_instance_buffer,
+            0,
+            bytemuck::cast_slice(&instance_data),
+        );
+    }
+
+    fn update_bounding_box_vertex_buffer(
+        &self,
+        settings: &Settings,
+        queue: &wgpu::Queue,
+        bounding_box_vertex_buffer: &wgpu::Buffer,
+    ) {
+        let (vertices, _) = Vertex::create_vertices_for_bounding_box(
+            Instance::calculate_bounding_box_size(settings),
+        );
+        queue.write_buffer(
+            bounding_box_vertex_buffer,
+            0,
+            bytemuck::cast_slice(&vertices),
+        );
+    }
+
+    fn update_transparency(&mut self, settings: &Settings) {
+        let mut new_flattened = Vec::new();
         // go throughout the 3d instances and update the transparency then flatten the instances and update the buffer
-        for z in 0..settings.num_instances_per_row {
-            for y in 0..settings.num_instances_per_row {
-                for x in 0..settings.num_instances_per_row {
-                    let index = (z as usize * settings.num_instances_per_row.pow(2) as usize)
-                        + (y as usize * settings.num_instances_per_row as usize)
-                        + x as usize;
-                    let sorted_index = self.sort_map[index];
-                    let instance = &mut self.flattened[sorted_index];
+        for layer in self.instances.iter_mut() {
+            for row in layer.iter_mut() {
+                for instance in row.iter_mut() {
                     instance.color.w = settings.transparency;
-                    let instance = &mut self.instances[z as usize][y as usize][x as usize];
-                    instance.color.w = settings.transparency;
+                    if instance.instance_state.state == CellStateEnum::Alive {
+                        new_flattened.push(*instance);
+                    }
                 }
             }
         }
-        self.update_buffer(settings, queue, instance_buffer)
+        self.flattened = new_flattened;
     }
 
-    fn update_space_between_instances(
-        &mut self,
-        settings: &Settings,
-        queue: &wgpu::Queue,
-        instance_buffer: &wgpu::Buffer,
-    ) {
+    fn update_space_between_instances(&mut self, settings: &Settings) {
+        let mut new_flattened = Vec::new();
         // go throughout the 3d instances and update the position then flatten the instances and update the buffer
-        for z in 0..settings.num_instances_per_row {
-            for y in 0..settings.num_instances_per_row {
-                for x in 0..settings.num_instances_per_row {
-                    let index = (z as usize * settings.num_instances_per_row.pow(2) as usize)
-                        + (y as usize * settings.num_instances_per_row as usize)
-                        + x as usize;
-                    let sorted_index = self.sort_map[index];
-                    let instance = &mut self.flattened[sorted_index];
-                    let ix = settings.space_between_instances
-                        * (instance.position.x / settings.space_between_instances).round();
-                    let iy = settings.space_between_instances
-                        * (instance.position.y / settings.space_between_instances).round();
-                    let iz = settings.space_between_instances
-                        * (instance.position.z / settings.space_between_instances).round();
+        for (x, layer) in self.instances.iter_mut().enumerate() {
+            for (y, row) in layer.iter_mut().enumerate() {
+                for (z, instance) in row.iter_mut().enumerate() {
+                    let (ix, iy, iz) =
+                        Instance::scale_x_y_z(x as u32, y as u32, z as u32, settings);
                     instance.position = cgmath::Vector3 {
                         x: ix,
                         y: iy,
                         z: iz,
                     };
-                    let instance = &mut self.instances[z as usize][y as usize][x as usize];
-                    instance.position = cgmath::Vector3 {
-                        x: ix,
-                        y: iy,
-                        z: iz,
-                    };
+                    if instance.instance_state.state == CellStateEnum::Alive {
+                        new_flattened.push(*instance);
+                    }
                 }
             }
         }
-        self.update_buffer(settings, queue, instance_buffer)
+        self.flattened = new_flattened;
     }
 
-    fn increase_num_instances_per_row(
+    fn increase_domain_size(
         &mut self,
         settings: &Settings,
         device: &wgpu::Device,
@@ -662,31 +679,26 @@ impl InstanceManager {
     ) -> wgpu::Buffer {
         let mut new_instances: Vec<Vec<Vec<Instance>>> = Vec::new();
 
-        for x in 0..settings.num_instances_per_row {
+        for x in 0..settings.domain_size {
             let mut y_instances: Vec<Vec<Instance>> = Vec::new();
-            for y in 0..settings.num_instances_per_row {
+            for y in 0..settings.domain_size {
                 let mut z_instances: Vec<Instance> = Vec::new();
-                for z in 0..settings.num_instances_per_row {
+                for z in 0..settings.domain_size {
                     let instance = if x == 0
                         || y == 0
                         || z == 0
-                        || x == settings.num_instances_per_row - 1
-                        || y == settings.num_instances_per_row - 1
-                        || z == settings.num_instances_per_row - 1
+                        || x == settings.domain_size - 1
+                        || y == settings.domain_size - 1
+                        || z == settings.domain_size - 1
                     {
                         // Create a new instance
-                        let x = x as f32 * settings.space_between_instances;
-                        let y = y as f32 * settings.space_between_instances;
-                        let z = z as f32 * settings.space_between_instances;
-                        Instance::create_instance_at_pos(settings, x, y, z)
+                        let (x_scaled, y_scaled, z_scaled) =
+                            Instance::scale_x_y_z(x, y, z, settings);
+                        Instance::create_dead_instance_at_pos(
+                            settings, x_scaled, y_scaled, z_scaled,
+                        )
                     } else {
-                        let mut cached_instance = self.instances[x.saturating_sub(1) as usize]
-                            [y.saturating_sub(1) as usize]
-                            [z.saturating_sub(1) as usize];
-                        cached_instance.position.x += settings.space_between_instances;
-                        cached_instance.position.y += settings.space_between_instances;
-                        cached_instance.position.z += settings.space_between_instances;
-                        cached_instance
+                        self.instances[(x - 1) as usize][(y - 1) as usize][(z - 1) as usize]
                     };
                     z_instances.push(instance);
                 }
@@ -700,7 +712,7 @@ impl InstanceManager {
         self.create_new_buffer(settings, device)
     }
 
-    fn decrease_num_instances_per_row(
+    fn decrease_domain_size(
         &mut self,
         settings: &Settings,
         device: &wgpu::Device,
@@ -709,16 +721,12 @@ impl InstanceManager {
         let mut new_instances: Vec<Vec<Vec<Instance>>> = Vec::new();
 
         // remove the outer layer of instances and keep the cube inside eg initially 12x12x12 then 10x10x10 remove 1 layer from each side
-        for x in 1..settings.num_instances_per_row + 1 {
+        for x in 1..settings.domain_size + 1 {
             let mut y_instances: Vec<Vec<Instance>> = Vec::new();
-            for y in 1..settings.num_instances_per_row + 1 {
+            for y in 1..settings.domain_size + 1 {
                 let mut z_instances: Vec<Instance> = Vec::new();
-                for z in 1..settings.num_instances_per_row + 1 {
-                    let mut instance = self.instances[x as usize][y as usize][z as usize];
-                    instance.position.x -= settings.space_between_instances;
-                    instance.position.y -= settings.space_between_instances;
-                    instance.position.z -= settings.space_between_instances;
-                    z_instances.push(instance);
+                for z in 1..settings.domain_size + 1 {
+                    z_instances.push(self.instances[x as usize][y as usize][z as usize]);
                 }
                 y_instances.push(z_instances);
             }
@@ -731,56 +739,9 @@ impl InstanceManager {
     }
 }
 
-fn create_vertices(cube_size: f32) -> (Vec<Vertex>, Vec<u16>) {
-    let vertex_data = [
-        // top (0, 0, 1)
-        Vertex::new([-cube_size, -cube_size, cube_size], [0.0, 0.0]),
-        Vertex::new([cube_size, -cube_size, cube_size], [1.0, 0.0]),
-        Vertex::new([cube_size, cube_size, cube_size], [1.0, 1.0]),
-        Vertex::new([-cube_size, cube_size, cube_size], [0.0, 1.0]),
-        // bottom (0, 0, -1)
-        Vertex::new([-cube_size, cube_size, -cube_size], [1.0, 0.0]),
-        Vertex::new([cube_size, cube_size, -cube_size], [0.0, 0.0]),
-        Vertex::new([cube_size, -cube_size, -cube_size], [0.0, 1.0]),
-        Vertex::new([-cube_size, -cube_size, -cube_size], [1.0, 1.0]),
-        // right (1, 0, 0)
-        Vertex::new([cube_size, -cube_size, -cube_size], [0.0, 0.0]),
-        Vertex::new([cube_size, cube_size, -cube_size], [1.0, 0.0]),
-        Vertex::new([cube_size, cube_size, cube_size], [1.0, 1.0]),
-        Vertex::new([cube_size, -cube_size, cube_size], [0.0, 1.0]),
-        // left (-1, 0, 0)
-        Vertex::new([-cube_size, -cube_size, cube_size], [1.0, 0.0]),
-        Vertex::new([-cube_size, cube_size, cube_size], [0.0, 0.0]),
-        Vertex::new([-cube_size, cube_size, -cube_size], [0.0, 1.0]),
-        Vertex::new([-cube_size, -cube_size, -cube_size], [1.0, 1.0]),
-        // front (0, 1, 0)
-        Vertex::new([cube_size, cube_size, -cube_size], [1.0, 0.0]),
-        Vertex::new([-cube_size, cube_size, -cube_size], [0.0, 0.0]),
-        Vertex::new([-cube_size, cube_size, cube_size], [0.0, 1.0]),
-        Vertex::new([cube_size, cube_size, cube_size], [1.0, 1.0]),
-        // back (0, -1, 0)
-        Vertex::new([cube_size, -cube_size, cube_size], [0.0, 0.0]),
-        Vertex::new([-cube_size, -cube_size, cube_size], [1.0, 0.0]),
-        Vertex::new([-cube_size, -cube_size, -cube_size], [1.0, 1.0]),
-        Vertex::new([cube_size, -cube_size, -cube_size], [0.0, 1.0]),
-    ];
-
-    let index_data: &[u16] = &[
-        0, 1, 2, 2, 3, 0, // top
-        4, 5, 6, 6, 7, 4, // bottom
-        8, 9, 10, 10, 11, 8, // right
-        12, 13, 14, 14, 15, 12, // left
-        16, 17, 18, 18, 19, 16, // front
-        20, 21, 22, 22, 23, 20, // back
-    ];
-
-    (vertex_data.to_vec(), index_data.to_vec())
-}
-
 struct App {
     vertex_buf: wgpu::Buffer,
     index_buf: wgpu::Buffer,
-    index_count: usize,
     bind_group: wgpu::BindGroup,
     uniform_buf: wgpu::Buffer,
     pipeline: wgpu::RenderPipeline,
@@ -799,11 +760,19 @@ struct App {
     settings: Settings,
     depth_texture: Texture,
     update_queue: UpdateQueue,
+    bounding_box_vertex_buf: wgpu::Buffer,
+    bounding_box_index_buf: wgpu::Buffer,
+    bounding_box_num_indices: u32,
+    bounding_box_instance_buffer: wgpu::Buffer,
+    world_grid_pipeline: wgpu::RenderPipeline,
+    world_grid_pipeline_depth: wgpu::RenderPipeline,
+    world_grid_vertices: Vec<Vertex>,
+    world_grid_buffer: wgpu::Buffer,
 }
 
 impl App {
     fn generate_matrix(aspect_ratio: f32) -> glam::Mat4 {
-        let projection = glam::Mat4::perspective_rh(consts::FRAC_PI_4, aspect_ratio, 1.0, 10.0);
+        let projection = glam::Mat4::perspective_rh(consts::FRAC_PI_4, aspect_ratio, 1.0, 1.0);
         let view = glam::Mat4::look_at_rh(
             glam::Vec3::new(1.5f32, -5.0, 3.0),
             glam::Vec3::ZERO,
@@ -826,7 +795,9 @@ impl App {
     fn transparency_update(&mut self) {
         let yaw_diff = (self.camera.yaw - self.last_sort_camera.yaw).0.abs();
         let pitch_diff = (self.camera.pitch - self.last_sort_camera.pitch).0.abs();
-        if yaw_diff > self.settings.angle_threshold_for_sort
+        let translation_diff = self.camera.position - self.last_sort_camera.position;
+        if translation_diff.magnitude() > self.settings.translation_threshold_for_sort
+            || yaw_diff > self.settings.angle_threshold_for_sort
             || pitch_diff > self.settings.angle_threshold_for_sort
         {
             self.update_queue.add(UpdateEnum::SortInstances);
@@ -834,61 +805,78 @@ impl App {
     }
 
     fn simulation_update(&mut self, queue: &wgpu::Queue) {
-        if self.settings.last_simulation_tick.elapsed().as_millis()
-            >= self.settings.simulation_tick_rate.into()
+        if (self.settings.last_simulation_tick.elapsed().as_millis()
+            >= self.settings.simulation_tick_rate.into())
+            && !self.settings.simulation_paused
         {
             let start = std::time::Instant::now();
             self.instance_manager
-                .simulate(&self.settings, queue, &self.instance_buffer);
+                .simulate(&mut self.settings, queue, &self.instance_buffer);
             self.settings.last_simulation_tick = std::time::Instant::now();
             log::debug!("Time to simulate: {:?}", start.elapsed());
         }
     }
 
     fn queue_update(&mut self, gpu_queue: &wgpu::Queue, device: &wgpu::Device) {
+        let mut scheduled_updates = Vec::new();
         for update in self.update_queue.queue.iter() {
             match update {
                 UpdateEnum::Transparency => {
-                    self.instance_manager.update_transparency(
-                        &self.settings,
-                        gpu_queue,
-                        &self.instance_buffer,
-                    );
+                    self.instance_manager.update_transparency(&self.settings);
+                    scheduled_updates.push(UpdateEnum::SortInstances);
+                    scheduled_updates.push(UpdateEnum::UpdateBuffer);
                 }
                 UpdateEnum::SpaceBetweenInstances => {
-                    self.instance_manager.update_space_between_instances(
-                        &self.settings,
-                        gpu_queue,
-                        &self.instance_buffer,
-                    );
+                    self.instance_manager
+                        .update_space_between_instances(&self.settings);
+                    scheduled_updates.push(UpdateEnum::UpdateBoundingBox);
+                    scheduled_updates.push(UpdateEnum::SortInstances);
+                    scheduled_updates.push(UpdateEnum::UpdateBuffer);
                 }
                 UpdateEnum::SortInstances => {
                     self.instance_manager
                         .sort_by_distance_to_camera(&self.camera);
                     self.last_sort_camera = self.camera;
+                }
+                UpdateEnum::NumInstancesIncreased => {
+                    self.instance_buffer = self.instance_manager.increase_domain_size(
+                        &self.settings,
+                        device,
+                        &self.camera,
+                    );
+                    scheduled_updates.push(UpdateEnum::UpdateBoundingBox);
+                }
+                UpdateEnum::NumInstancesDecreased => {
+                    self.instance_buffer = self.instance_manager.decrease_domain_size(
+                        &self.settings,
+                        device,
+                        &self.camera,
+                    );
+                    scheduled_updates.push(UpdateEnum::UpdateBoundingBox);
+                }
+                UpdateEnum::UpdateBoundingBox => {
+                    self.instance_manager.update_bounding_box_vertex_buffer(
+                        &self.settings,
+                        gpu_queue,
+                        &self.bounding_box_vertex_buf,
+                    );
+                    self.instance_manager.update_bounding_box_instance_buffer(
+                        &self.settings,
+                        gpu_queue,
+                        &self.bounding_box_instance_buffer,
+                    );
+                }
+                UpdateEnum::UpdateBuffer => {
                     self.instance_manager.update_buffer(
                         &self.settings,
                         gpu_queue,
                         &self.instance_buffer,
                     );
                 }
-                UpdateEnum::NumInstancesIncreased => {
-                    self.instance_buffer = self.instance_manager.increase_num_instances_per_row(
-                        &self.settings,
-                        device,
-                        &self.camera,
-                    );
-                }
-                UpdateEnum::NumInstancesDecreased => {
-                    self.instance_buffer = self.instance_manager.decrease_num_instances_per_row(
-                        &self.settings,
-                        device,
-                        &self.camera,
-                    );
-                }
             }
         }
         self.update_queue.reset();
+        self.update_queue.schedule_updates(scheduled_updates);
     }
 }
 
@@ -901,12 +889,15 @@ impl cellular_automata_3d::framework::App for App {
         config: &wgpu::SurfaceConfiguration,
         _adapter: &wgpu::Adapter,
         device: &wgpu::Device,
-        simulation_rules: &SimulationRules,
+        command_line_args: &CommandLineArgs,
     ) -> Self {
-        let settings = Settings::new(simulation_rules.clone());
+        let settings = Settings::new(command_line_args.clone());
         // Create the vertex and index buffers
-        let (vertex_data, index_data) = create_vertices(settings.cube_size);
-
+        let (vertex_data, index_data) = Vertex::create_vertices(settings.cube_size);
+        let (bounding_box_vertex_data, bounding_box_index_data) =
+            Vertex::create_vertices_for_bounding_box(Instance::calculate_bounding_box_size(
+                &settings,
+            ));
         let vertex_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Vertex Buffer"),
             contents: bytemuck::cast_slice(&vertex_data),
@@ -919,7 +910,20 @@ impl cellular_automata_3d::framework::App for App {
             usage: wgpu::BufferUsages::INDEX,
         });
 
-        let mut instance_manager = InstanceManager::prepare_initial_instances(&settings);
+        let bounding_box_vertex_buf =
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Bounding Box Vertex Buffer"),
+                contents: bytemuck::cast_slice(&bounding_box_vertex_data),
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            });
+
+        let bounding_box_index_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Bounding Box Index Buffer"),
+            contents: bytemuck::cast_slice(&bounding_box_index_data),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+
+        let mut instance_manager = InstanceManager::new(&settings);
 
         let (
             camera,
@@ -933,6 +937,14 @@ impl cellular_automata_3d::framework::App for App {
 
         instance_manager.sort_by_distance_to_camera(&camera);
         let instance_buffer = instance_manager.create_new_buffer(&settings, device);
+
+        let bounding_box_instance = Instance::create_bounding_box(&settings);
+        let bounding_box_instance_buffer =
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Bounding Box Instance Buffer"),
+                contents: bytemuck::cast_slice(&[bounding_box_instance.to_raw(&settings)]),
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            });
 
         // Create pipeline layout
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -953,6 +965,12 @@ impl cellular_automata_3d::framework::App for App {
             bind_group_layouts: &[&bind_group_layout, &camera_bind_group_layout],
             push_constant_ranges: &[],
         });
+        let bounding_box_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("Bounding Box Pipeline Layout"),
+                bind_group_layouts: &[&bind_group_layout, &camera_bind_group_layout],
+                push_constant_ranges: &[],
+            });
 
         // Create other resources
         let mx_total = Self::generate_matrix(config.width as f32 / config.height as f32);
@@ -974,9 +992,21 @@ impl cellular_automata_3d::framework::App for App {
             label: None,
         });
 
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        let cube_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: None,
-            source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(include_str!("shader.wgsl"))),
+            source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(include_str!("shaders/shader.wgsl"))),
+        });
+        let world_grid_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: None,
+            source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(include_str!(
+                "shaders/world_grid.wgsl"
+            ))),
+        });
+        let world_grid_vertices = Vertex::create_vertices_for_world_grid(200.0);
+        let world_grid_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("World Grid Vertex Buffer"),
+            contents: bytemuck::cast_slice(&world_grid_vertices),
+            usage: wgpu::BufferUsages::VERTEX,
         });
 
         let vertex_buffers = &[Vertex::desc(), InstanceRaw::desc()];
@@ -984,13 +1014,13 @@ impl cellular_automata_3d::framework::App for App {
             label: Some("Render Pipeline"),
             layout: Some(&pipeline_layout),
             vertex: wgpu::VertexState {
-                module: &shader,
+                module: &cube_shader,
                 entry_point: "vs_main",
                 buffers: vertex_buffers,
                 compilation_options: PipelineCompilationOptions::default(),
             },
             fragment: Some(wgpu::FragmentState {
-                module: &shader,
+                module: &cube_shader,
                 entry_point: "fs_main",
                 targets: &[Some(wgpu::ColorTargetState {
                     format: config.format,
@@ -1042,15 +1072,15 @@ impl cellular_automata_3d::framework::App for App {
         {
             let pipeline_wire = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: None,
-                layout: Some(&pipeline_layout),
+                layout: Some(&bounding_box_pipeline_layout),
                 vertex: wgpu::VertexState {
-                    module: &shader,
+                    module: &cube_shader,
                     entry_point: "vs_main",
                     buffers: vertex_buffers,
                     compilation_options: PipelineCompilationOptions::default(),
                 },
                 fragment: Some(wgpu::FragmentState {
-                    module: &shader,
+                    module: &cube_shader,
                     entry_point: "fs_wire",
                     targets: &[Some(wgpu::ColorTargetState {
                         format: config.view_formats[0],
@@ -1068,17 +1098,11 @@ impl cellular_automata_3d::framework::App for App {
                 }),
                 primitive: wgpu::PrimitiveState {
                     front_face: wgpu::FrontFace::Ccw,
-                    cull_mode: Some(wgpu::Face::Back),
+                    cull_mode: None,
                     polygon_mode: wgpu::PolygonMode::Line,
                     ..Default::default()
                 },
-                depth_stencil: Some(wgpu::DepthStencilState {
-                    format: DEPTH_FORMAT,
-                    depth_write_enabled: true,
-                    depth_compare: wgpu::CompareFunction::Less, // 1.
-                    stencil: wgpu::StencilState::default(),     // 2.
-                    bias: wgpu::DepthBiasState::default(),
-                }),
+                depth_stencil: None,
                 multisample: wgpu::MultisampleState::default(),
                 multiview: None,
             });
@@ -1086,12 +1110,108 @@ impl cellular_automata_3d::framework::App for App {
         } else {
             None
         };
+        let world_grid_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("World Grid Pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &world_grid_shader,
+                entry_point: "vs_main",
+                buffers: &[Vertex::desc()],
+                compilation_options: PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &world_grid_shader,
+                entry_point: "fs_main",
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: config.format,
+                    blend: Some(wgpu::BlendState {
+                        color: wgpu::BlendComponent {
+                            src_factor: wgpu::BlendFactor::SrcAlpha,
+                            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                            operation: wgpu::BlendOperation::Add,
+                        },
+                        alpha: wgpu::BlendComponent::OVER,
+                    }),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: PipelineCompilationOptions::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList, // Changed from LineList to TriangleList
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState {
+                count: 1,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            multiview: None,
+        });
+        let world_grid_pipeline_depth =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("World Grid Depth Pipeline"),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &world_grid_shader,
+                    entry_point: "vs_main",
+                    buffers: &[Vertex::desc()],
+                    compilation_options: PipelineCompilationOptions::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &world_grid_shader,
+                    entry_point: "fs_main",
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: config.format,
+                        blend: Some(wgpu::BlendState {
+                            color: wgpu::BlendComponent {
+                                src_factor: wgpu::BlendFactor::SrcAlpha,
+                                dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                                operation: wgpu::BlendOperation::Add,
+                            },
+                            alpha: wgpu::BlendComponent {
+                                src_factor: wgpu::BlendFactor::Zero,
+                                dst_factor: wgpu::BlendFactor::One,
+                                operation: wgpu::BlendOperation::Add,
+                            },
+                        }),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: PipelineCompilationOptions::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    strip_index_format: None,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: None,
+                    polygon_mode: wgpu::PolygonMode::Fill,
+                    unclipped_depth: false,
+                    conservative: false,
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: DEPTH_FORMAT,
+                    depth_write_enabled: true,
+                    depth_compare: wgpu::CompareFunction::Less, // Ensure correct depth test
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+                multisample: wgpu::MultisampleState {
+                    count: 1,
+                    mask: !0,
+                    alpha_to_coverage_enabled: false,
+                },
+                multiview: None,
+            });
 
         // Done
         App {
             vertex_buf,
             index_buf,
-            index_count: index_data.len(),
             bind_group,
             uniform_buf,
             pipeline,
@@ -1110,6 +1230,14 @@ impl cellular_automata_3d::framework::App for App {
             settings,
             depth_texture,
             update_queue: UpdateQueue::new(),
+            bounding_box_vertex_buf,
+            bounding_box_index_buf,
+            bounding_box_num_indices: bounding_box_index_data.len() as u32,
+            bounding_box_instance_buffer,
+            world_grid_buffer,
+            world_grid_pipeline,
+            world_grid_pipeline_depth,
+            world_grid_vertices,
         }
     }
 
@@ -1149,18 +1277,19 @@ impl cellular_automata_3d::framework::App for App {
                                     + self.settings.space_between_step_size,
                                 &mut self.update_queue,
                             );
+                        } else if s.as_str() == "o" {
+                            self.settings.toggle_pause_simulation();
                         }
                     } else if let Key::Named(key) = logical_key {
                         if key == NamedKey::PageUp {
-                            self.settings.set_num_instances_per_row(
-                                self.settings.num_instances_per_row
-                                    + self.settings.num_instances_step_size,
+                            self.settings.set_domain_size(
+                                self.settings.domain_size + self.settings.num_instances_step_size,
                                 &mut self.update_queue,
                             );
                         } else if key == NamedKey::PageDown {
-                            self.settings.set_num_instances_per_row(
+                            self.settings.set_domain_size(
                                 self.settings
-                                    .num_instances_per_row
+                                    .domain_size
                                     .saturating_sub(self.settings.num_instances_step_size),
                                 &mut self.update_queue,
                             );
@@ -1212,16 +1341,41 @@ impl cellular_automata_3d::framework::App for App {
     }
 
     fn render(&mut self, view: &wgpu::TextureView, device: &wgpu::Device, queue: &wgpu::Queue) {
-        let mut encoder =
+        let mut world_grid_encoder =
             device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
         {
-            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            let mut render_pass =
+                world_grid_encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: None,
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+            render_pass.set_pipeline(&self.world_grid_pipeline);
+            render_pass.set_vertex_buffer(0, self.world_grid_buffer.slice(..));
+            render_pass.set_bind_group(0, &self.bind_group, &[]);
+            render_pass.set_bind_group(1, &self.camera_bind_group, &[]);
+            render_pass.draw(0..self.world_grid_vertices.len() as u32, 0..1);
+        }
+
+        let mut main_encoder =
+            device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        {
+            let mut render_pass = main_encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: None,
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        load: wgpu::LoadOp::Load,
                         store: wgpu::StoreOp::Store,
                     },
                 })],
@@ -1250,64 +1404,88 @@ impl cellular_automata_3d::framework::App for App {
             );
             render_pass.pop_debug_group();
             render_pass.insert_debug_marker("Draw!");
-            if let Some(ref pipe) = self.pipeline_wire {
-                if self.settings.wireframe_overlay {
-                    render_pass.set_pipeline(pipe);
-                    render_pass.draw_indexed(
-                        0..self.index_count as u32,
-                        0,
-                        0..self.instance_manager.flattened.len() as _,
-                    );
-                }
-            }
         }
 
-        queue.submit(Some(encoder.finish()));
+        let mut world_grid_overlay_encoder =
+            device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        {
+            let mut render_pass =
+                world_grid_overlay_encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: None,
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: &self.depth_texture.view,
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        }),
+                        stencil_ops: None,
+                    }),
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+            render_pass.set_pipeline(&self.world_grid_pipeline_depth);
+            render_pass.set_vertex_buffer(0, self.world_grid_buffer.slice(..));
+            render_pass.set_bind_group(0, &self.bind_group, &[]);
+            render_pass.set_bind_group(1, &self.camera_bind_group, &[]);
+            render_pass.draw(0..self.world_grid_vertices.len() as u32, 0..1);
+        }
+
+        queue.submit(Some(world_grid_encoder.finish()));
+        queue.submit(Some(main_encoder.finish()));
+        queue.submit(Some(world_grid_overlay_encoder.finish()));
+
+        if let Some(ref pipeline_wire) = self.pipeline_wire {
+            if self.settings.wireframe_overlay {
+                let mut encoder =
+                    device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+                {
+                    let mut wireframe_render_pass =
+                        encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                            label: None,
+                            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                view,
+                                resolve_target: None,
+                                ops: wgpu::Operations {
+                                    load: wgpu::LoadOp::Load,
+                                    store: wgpu::StoreOp::Store,
+                                },
+                            })],
+                            depth_stencil_attachment: None,
+                            timestamp_writes: None,
+                            occlusion_query_set: None,
+                        });
+
+                    wireframe_render_pass.set_pipeline(pipeline_wire);
+                    wireframe_render_pass.set_bind_group(0, &self.bind_group, &[]);
+                    wireframe_render_pass.set_bind_group(1, &self.camera_bind_group, &[]);
+                    wireframe_render_pass
+                        .set_vertex_buffer(0, self.bounding_box_vertex_buf.slice(..));
+                    wireframe_render_pass
+                        .set_vertex_buffer(1, self.bounding_box_instance_buffer.slice(..));
+                    wireframe_render_pass.set_index_buffer(
+                        self.bounding_box_index_buf.slice(..),
+                        wgpu::IndexFormat::Uint16,
+                    );
+                    wireframe_render_pass.draw_indexed(0..self.bounding_box_num_indices, 0, 0..1);
+                }
+
+                queue.submit(Some(encoder.finish()));
+            }
+        }
     }
 }
 
-// Initialize logging in platform dependant ways.
-fn init_logger(debug_mode: bool) {
-    let filter_level = if debug_mode {
-        log::LevelFilter::Debug
-    } else {
-        log::LevelFilter::Info
-    };
-
-    env_logger::builder()
-        .filter_level(filter_level)
-        // We keep wgpu at Error level, as it's very noisy.
-        .filter_module("wgpu_core", log::LevelFilter::Info)
-        .filter_module("wgpu_hal", log::LevelFilter::Error)
-        .filter_module("naga", log::LevelFilter::Error)
-        .parse_default_env()
-        .init();
-}
-
-#[derive(Parser, Debug)]
-#[command(
-    version,
-    about,
-    long_about = "A 3D cellular automata simulation using wgpu."
-)]
-struct CommandLineArgs {
-    /// The rules for the simulation in the format S/B/N/M"
-    /// where S is the survival rules, B is the birth rules, N is the number of states, and M is the neighbor method.
-    /// survival and birth can be in the format 0-2,4,6-11,13-17,21-26/9-10,16,23-24. where - is a range between <x>-<y> and , is a list of numbers.
-    /// N is a number between 1 and 255 and the last is either M or V for Von Neumann or Moore neighborhood.
-    /// Example: 4/4/5/M
-    #[arg(short, long)]
-    rules: Option<String>,
-    /// Enable Debug mode
-    /// This will enable debug mode which will print out more information to the console.
-    #[arg(short, long)]
-    debug: bool,
-}
-
 pub fn main() {
-    human_panic::setup_panic!();
+    // human_panic::setup_panic!();
     let args: CommandLineArgs = CommandLineArgs::parse();
     init_logger(args.debug);
-    let rules = SimulationRules::parse_rules(args.rules.as_deref());
-    cellular_automata_3d::framework::run::<App>("cube", rules);
+    cellular_automata_3d::framework::run::<App>("cube", args);
 }

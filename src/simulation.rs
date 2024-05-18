@@ -1,3 +1,5 @@
+use std::fmt::{Display, Formatter};
+
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum NeighborMethod {
     /// 26 neighbors
@@ -52,6 +54,40 @@ pub static MOORE_NEIGHBORS: [(i32, i32, i32); 26] = [
     (0, 1, 1),
     (1, 1, 1),
 ];
+
+#[derive(Clone, Copy, Default, Debug, PartialEq)]
+pub enum CellStateEnum {
+    #[default]
+    Alive,
+    Fading,
+    Dead,
+}
+
+impl CellStateEnum {
+    pub fn to_int(self) -> u8 {
+        match self {
+            CellStateEnum::Alive => 1,
+            CellStateEnum::Fading => 2,
+            CellStateEnum::Dead => 0,
+        }
+    }
+}
+
+impl Display for CellStateEnum {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CellStateEnum::Alive => write!(f, "Alive"),
+            CellStateEnum::Fading => write!(f, "Fading"),
+            CellStateEnum::Dead => write!(f, "Dead"),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Default, Debug, PartialEq)]
+pub struct CellState {
+    pub state: CellStateEnum,
+    pub fade_level: u8,
+}
 
 // Using the format from Softology's Blog (https://softologyblog.wordpress.com/2019/12/28/3d-cellular-automata-3/)
 // Example: Rule 445 is the first rule in the video and shown as 4/4/5/M. This is fairly standard survival/birth CA syntax.
@@ -113,7 +149,7 @@ impl SimulationRules {
         }
         let survival_parts: Vec<&str> = parts[0].split(',').collect();
         // check if survival parts has only one element which is a empty string, i.e. empty rule
-        if !(survival_parts.len() == 1 && survival_parts[0] == "") {
+        if !(survival_parts.len() == 1 && survival_parts[0].is_empty()) {
             for part in survival_parts {
                 if part.contains('-') {
                     let range: Vec<&str> = part.split('-').collect();
@@ -160,7 +196,7 @@ impl SimulationRules {
         }
         let birth_parts: Vec<&str> = parts[1].split(',').collect();
         // check if birth parts has only one element which is a empty string, i.e. empty rule
-        if !(birth_parts.len() == 1 && birth_parts[0] == "") {
+        if !(birth_parts.len() == 1 && birth_parts[0].is_empty()) {
             for part in birth_parts {
                 if part.contains('-') {
                     let range: Vec<&str> = part.split('-').collect();
