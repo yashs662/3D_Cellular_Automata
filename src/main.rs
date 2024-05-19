@@ -1625,5 +1625,5 @@ pub fn main() {
     // human_panic::setup_panic!();
     let args: CommandLineArgs = CommandLineArgs::parse();
     init_logger(args.debug);
-    cellular_automata_3d::framework::run::<App>("cube", args);
+    cellular_automata_3d::framework::run::<App>("3D Cellular Automata", args);
 }

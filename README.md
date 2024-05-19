@@ -1,8 +1,16 @@
-# 3D Celluar Automata
+# 3D Cellular Automata
 
-A multithreaded 3D cellular automata implementation in Rust with wgpu <br> (🚧WIP🚧 - currently moving to wgpu from a bevy implementation)
+A multithreaded 3D cellular automata implementation in Rust with wgpu
 
-## Old Screenshots
+## Screenshots
 
-![cellular_automata](https://user-images.githubusercontent.com/66156000/206888650-435b93a0-1981-41dd-9e6c-6a5fd30096a9.png)
-![cellular_automata_1](https://user-images.githubusercontent.com/66156000/206888768-745b520a-8492-43de-a657-219a4cb7a9d5.png)
+![3d_cellular_automata_1](https://github.com/yashs662/3D_Cellular_Automata/assets/66156000/bf57e288-30fe-4d5f-b212-5bcc227d3630)
+
+![3d_cellular_automata_2](https://github.com/yashs662/3D_Cellular_Automata/assets/66156000/d0149d6f-87a0-4392-ad43-55e1000f8644)
+
+## TODO
+
+- [ ] Allow for predefined colors to be used from the CLI
+- [ ] Limit how fast a user can spam the keys to avoid trying to access for e.g. self.instances before increase_num_instances has finished
+- [ ] Add Easing Functions for Color Lerp
+- [ ] Text GUI for changing the rules, showing keybindings, etc

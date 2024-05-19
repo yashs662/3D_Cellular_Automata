@@ -1,5 +1,6 @@
 use cgmath::Vector4;
 use clap::Parser;
+use palette::{Mix, Srgb};
 
 /// Initialize logging in platform dependant ways.
 pub fn init_logger(debug_mode: bool) {
@@ -156,12 +157,23 @@ impl Validator {
 
 pub fn lerp_color(color_1: Vector4<f32>, color_2: Vector4<f32>, dt: f32) -> Vector4<f32> {
     let dt = dt.max(0.0).min(1.0);
-    let inv = 1.0 - dt;
-    let lerped = [
-        color_1.x * dt + color_2.x * inv,
-        color_1.y * dt + color_2.y * inv,
-        color_1.z * dt + color_2.z * inv,
-        color_1.w * dt + color_2.w * inv,
-    ];
-    Vector4::new(lerped[0], lerped[1], lerped[2], lerped[3])
+    // Ease Out Exponential
+
+    // let dt = if dt == 1.0 {
+    //     1.0
+    // } else {
+    //     1.0 - 2.0f32.powf(-10.0 * dt)
+    // };
+
+    let srgb_1 = Srgb::new(color_1.x, color_1.y, color_1.z);
+    let srgb_2 = Srgb::new(color_2.x, color_2.y, color_2.z);
+
+    let mixed = srgb_1.mix(srgb_2, dt);
+
+    Vector4::new(
+        mixed.red,
+        mixed.green,
+        mixed.blue,
+        color_1.w * dt + color_2.w * (1.0 - dt),
+    )
 }
