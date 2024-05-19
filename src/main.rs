@@ -10,13 +10,15 @@ use cellular_automata_3d::{
 use cgmath::{EuclideanSpace, InnerSpace, Rotation3};
 use clap::Parser;
 use rand::{rngs::ThreadRng, Rng};
-use rayon::prelude::*;
 use std::{borrow::Cow, f32::consts, mem};
 use wgpu::{util::DeviceExt, PipelineCompilationOptions};
 use winit::{
     event::{DeviceEvent, ElementState, KeyEvent, MouseButton, WindowEvent},
     keyboard::{Key, NamedKey},
 };
+
+#[cfg(feature = "multithreading")]
+use rayon::prelude::*;
 
 pub struct UpdateQueue {
     queue: Vec<UpdateEnum>,
@@ -52,6 +54,16 @@ enum UpdateEnum {
     CreateNewBuffer,
 }
 
+#[derive(Debug, PartialEq)]
+enum SimulationMode {
+    SingleThreaded,
+    #[cfg(feature = "multithreading")]
+    MultiThreaded,
+    // Gpu,
+}
+
+// Allow Dead Code as multithreading uses simulation mode but when rayon is not enabled it is not used
+#[allow(dead_code)]
 pub struct Settings {
     bounding_box_active: bool,
     world_grid_active: bool,
@@ -70,6 +82,7 @@ pub struct Settings {
     noise_amount: u8,
     simulation_rules: SimulationRules,
     simulation_paused: bool,
+    simulation_mode: SimulationMode,
 }
 
 impl Default for Settings {
@@ -109,6 +122,12 @@ impl Settings {
         let last_simulation_tick = std::time::Instant::now();
         let simulation_paused = true; // Start simulation paused
 
+        #[cfg(feature = "multithreading")]
+        let simulation_mode = SimulationMode::MultiThreaded;
+
+        #[cfg(not(feature = "multithreading"))]
+        let simulation_mode = SimulationMode::SingleThreaded;
+
         log::debug!("Setting simulation tick rate to: {}", simulation_tick_rate);
         log::debug!("Setting domain size to: {}", domain_size);
         log::debug!("Setting initial spawn size to: {}", spawn_size);
@@ -132,12 +151,33 @@ impl Settings {
             noise_amount,
             simulation_rules,
             simulation_paused,
+            simulation_mode,
         }
     }
 
-    pub fn toggle_wireframe_overlay(&mut self) {
+    #[cfg(feature = "multithreading")]
+    pub fn next_simulation_mode(&mut self) {
+        self.simulation_mode = match self.simulation_mode {
+            SimulationMode::SingleThreaded => SimulationMode::MultiThreaded,
+            SimulationMode::MultiThreaded => SimulationMode::SingleThreaded,
+            // SimulationMode::Gpu => SimulationMode::SingleThreaded,
+        };
+        log::info!("Simulation mode set to: {:?}", self.simulation_mode);
+    }
+
+    #[cfg(not(feature = "multithreading"))]
+    pub fn next_simulation_mode(&mut self) {
+        log::warn!("Multithreading feature is not enabled, cannot switch to multi-threaded mode");
+    }
+
+    pub fn toggle_bounding_box(&mut self) {
         self.bounding_box_active = !self.bounding_box_active;
         log::info!("Wireframe overlay set to: {}", self.bounding_box_active);
+    }
+
+    pub fn toggle_world_grid(&mut self) {
+        self.world_grid_active = !self.world_grid_active;
+        log::info!("World grid display set to: {}", self.world_grid_active);
     }
 
     pub fn toggle_pause_simulation(&mut self) {
@@ -470,13 +510,28 @@ impl InstanceManager {
         })
     }
 
+    #[cfg(feature = "multithreading")]
     fn sort_by_distance_to_camera(&mut self, camera: &Camera) {
         let start = std::time::Instant::now();
         let camera_position = camera.position.to_vec();
+        self.flattened.par_sort_by(|a, b| {
+            let a_dist = (a.position - camera_position).magnitude();
+            let b_dist = (b.position - camera_position).magnitude();
+            b_dist.partial_cmp(&a_dist).unwrap()
+        });
+        // SimulationMode::Gpu => {
+        //     // Maybe use the gpu to sort the instances
+        // }
+        log::debug!("Time to sort: {:?}", start.elapsed());
+    }
 
-        self.flattened.par_sort_by(|&i, &j| {
-            let a_dist = (i.position - camera_position).magnitude();
-            let b_dist = (j.position - camera_position).magnitude();
+    #[cfg(not(feature = "multithreading"))]
+    fn sort_by_distance_to_camera(&mut self, camera: &Camera) {
+        let start = std::time::Instant::now();
+        let camera_position = camera.position.to_vec();
+        self.flattened.sort_by(|a, b| {
+            let a_dist = (a.position - camera_position).magnitude();
+            let b_dist = (b.position - camera_position).magnitude();
             b_dist.partial_cmp(&a_dist).unwrap()
         });
         log::debug!("Time to sort: {:?}", start.elapsed());
@@ -507,85 +562,7 @@ impl InstanceManager {
         self.flattened.len() < new_flattened_length
     }
 
-    fn simulate(&mut self, settings: &mut Settings, update_queue: &mut UpdateQueue) {
-        let instance_cache = self.instances.clone();
-        let did_something = self
-            .instances
-            .par_iter_mut()
-            .enumerate()
-            .map(|(x, layer)| {
-                let mut thread_did_something = false;
-                for (y, row) in layer.iter_mut().enumerate() {
-                    for (z, instance) in row.iter_mut().enumerate() {
-                        let mut alive_neighbors = 0;
-                        let neighbors = settings
-                            .simulation_rules
-                            .neighbor_method
-                            .get_neighbor_iter();
-                        for (dx, dy, dz) in neighbors {
-                            let ix = ((x as i32 + dx) % settings.domain_size as i32
-                                + settings.domain_size as i32)
-                                % settings.domain_size as i32;
-                            let iy = ((y as i32 + dy) % settings.domain_size as i32
-                                + settings.domain_size as i32)
-                                % settings.domain_size as i32;
-                            let iz = ((z as i32 + dz) % settings.domain_size as i32
-                                + settings.domain_size as i32)
-                                % settings.domain_size as i32;
-
-                            let neighbor = &instance_cache[ix as usize][iy as usize][iz as usize];
-                            if neighbor.instance_state.state == CellStateEnum::Alive {
-                                alive_neighbors += 1;
-                            }
-                        }
-
-                        match instance.instance_state.state {
-                            CellStateEnum::Alive => {
-                                if !settings
-                                    .simulation_rules
-                                    .survival
-                                    .contains(&alive_neighbors)
-                                {
-                                    if settings.simulation_rules.num_states > 2 {
-                                        instance.instance_state.state = CellStateEnum::Fading;
-                                    } else {
-                                        instance.instance_state.state = CellStateEnum::Dead;
-                                    }
-                                    thread_did_something = true;
-                                }
-                            }
-                            CellStateEnum::Fading => {
-                                // TODO: Decide if Fading cells should be able to come back to life
-                                // if settings.simulation_rules.birth.contains(&alive_neighbors) {
-                                //     instance.instance_state.state = CellStateEnum::Alive;
-                                //     instance.instance_state.fade_level = 0;
-                                //     flattened_instance.instance_state.state = CellStateEnum::Alive;
-                                //     flattened_instance.instance_state.fade_level = 0;
-                                // } else
-                                if instance.instance_state.fade_level
-                                    >= settings.simulation_rules.num_states
-                                {
-                                    instance.instance_state.state = CellStateEnum::Dead;
-                                } else if instance.instance_state.fade_level
-                                    < settings.simulation_rules.num_states
-                                {
-                                    instance.instance_state.fade_level += 1;
-                                }
-                                thread_did_something = true;
-                            }
-                            CellStateEnum::Dead => {
-                                if settings.simulation_rules.birth.contains(&alive_neighbors) {
-                                    instance.instance_state.state = CellStateEnum::Alive;
-                                    instance.instance_state.fade_level = 0;
-                                    thread_did_something = true;
-                                }
-                            }
-                        }
-                    }
-                }
-                thread_did_something
-            })
-            .reduce(|| false, |a, b| a || b);
+    fn handle_simulation_result(&mut self, did_something: bool, settings: &mut Settings, update_queue: &mut UpdateQueue) {
         if did_something {
             self.flatten(|| {
                 update_queue.add(UpdateEnum::SortInstances);
@@ -599,6 +576,32 @@ impl InstanceManager {
             log::warn!("Simulation has reached a stable state, pausing simulation");
             settings.simulation_paused = true;
         }
+    }
+    
+    #[cfg(feature = "multithreading")]
+    fn simulate(&mut self, settings: &mut Settings, update_queue: &mut UpdateQueue) {
+        let instance_cache = self.instances.clone();
+        let did_something = self
+            .instances
+            .par_iter_mut()
+            .enumerate()
+            .map(|(x, layer)| per_thread_simulate(layer, settings, x, &instance_cache))
+            .reduce(|| false, |a, b| a || b);
+    
+        self.handle_simulation_result(did_something, settings, update_queue);
+    }
+    
+    #[cfg(not(feature = "multithreading"))]
+    fn simulate(&mut self, settings: &mut Settings, update_queue: &mut UpdateQueue) {
+        let instance_cache = self.instances.clone();
+        let did_anything = self
+            .instances
+            .iter_mut()
+            .enumerate()
+            .map(|(x, layer)| per_thread_simulate(layer, settings, x, &instance_cache))
+            .fold(false, |a, b| a || b);
+    
+        self.handle_simulation_result(did_anything, settings, update_queue);
     }
 
     fn update_buffer(
@@ -740,6 +743,75 @@ impl InstanceManager {
         self.sort_by_distance_to_camera(camera);
         return_update_enum
     }
+}
+
+fn per_thread_simulate(
+    layer: &mut [Vec<Instance>],
+    settings: &Settings,
+    x: usize,
+    instance_cache: &[Vec<Vec<Instance>>],
+) -> bool {
+    let mut thread_did_something = false;
+    for (y, row) in layer.iter_mut().enumerate() {
+        for (z, instance) in row.iter_mut().enumerate() {
+            let mut alive_neighbors = 0;
+            let neighbors = settings
+                .simulation_rules
+                .neighbor_method
+                .get_neighbor_iter();
+            for (dx, dy, dz) in neighbors {
+                let ix = ((x as i32 + dx) % settings.domain_size as i32
+                    + settings.domain_size as i32)
+                    % settings.domain_size as i32;
+                let iy = ((y as i32 + dy) % settings.domain_size as i32
+                    + settings.domain_size as i32)
+                    % settings.domain_size as i32;
+                let iz = ((z as i32 + dz) % settings.domain_size as i32
+                    + settings.domain_size as i32)
+                    % settings.domain_size as i32;
+
+                let neighbor = &instance_cache[ix as usize][iy as usize][iz as usize];
+                if neighbor.instance_state.state == CellStateEnum::Alive {
+                    alive_neighbors += 1;
+                }
+            }
+
+            match instance.instance_state.state {
+                CellStateEnum::Alive => {
+                    if !settings
+                        .simulation_rules
+                        .survival
+                        .contains(&alive_neighbors)
+                    {
+                        if settings.simulation_rules.num_states > 2 {
+                            instance.instance_state.state = CellStateEnum::Fading;
+                        } else {
+                            instance.instance_state.state = CellStateEnum::Dead;
+                        }
+                        thread_did_something = true;
+                    }
+                }
+                CellStateEnum::Fading => {
+                    if instance.instance_state.fade_level >= settings.simulation_rules.num_states {
+                        instance.instance_state.state = CellStateEnum::Dead;
+                    } else if instance.instance_state.fade_level
+                        < settings.simulation_rules.num_states
+                    {
+                        instance.instance_state.fade_level += 1;
+                    }
+                    thread_did_something = true;
+                }
+                CellStateEnum::Dead => {
+                    if settings.simulation_rules.birth.contains(&alive_neighbors) {
+                        instance.instance_state.state = CellStateEnum::Alive;
+                        instance.instance_state.fade_level = 0;
+                        thread_did_something = true;
+                    }
+                }
+            }
+        }
+    }
+    thread_did_something
 }
 
 struct App {
@@ -1274,7 +1346,7 @@ impl cellular_automata_3d::framework::App for App {
                 if state == ElementState::Pressed {
                     if let Key::Character(s) = logical_key {
                         if s.as_str() == "p" {
-                            self.settings.toggle_wireframe_overlay();
+                            self.settings.toggle_bounding_box();
                         } else if s.as_str() == "n" {
                             self.settings.set_transparency(
                                 self.settings.transparency - self.settings.transparency_step_size,
@@ -1299,6 +1371,10 @@ impl cellular_automata_3d::framework::App for App {
                             );
                         } else if s.as_str() == "o" {
                             self.settings.toggle_pause_simulation();
+                        } else if s.as_str() == "i" {
+                            self.settings.toggle_world_grid();
+                        } else if s.as_str() == "u" {
+                            self.settings.next_simulation_mode();
                         }
                     } else if let Key::Named(key) = logical_key {
                         if key == NamedKey::PageUp {

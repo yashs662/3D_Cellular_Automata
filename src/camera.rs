@@ -251,7 +251,7 @@ pub fn setup_camera(
     wgpu::BindGroupLayout,
     wgpu::BindGroup,
 ) {
-    let camera = Camera::new((0.0, 20.0, 40.0), cgmath::Deg(-90.0), cgmath::Deg(-30.0));
+    let camera = Camera::new((40.0, 20.0, 40.0), cgmath::Deg(-135.0), cgmath::Deg(-20.0));
     let projection = Projection::new(config.width, config.height, cgmath::Deg(45.0), 0.1, 100.0);
     let camera_controller = CameraController::new(10.0, 0.6);
 

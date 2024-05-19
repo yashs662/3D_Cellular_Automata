@@ -77,6 +77,33 @@ pub struct CellState {
     pub fade_level: u8,
 }
 
+// #[derive(Clone)]
+// pub enum ColorMethod {
+//     Single(Color),
+//     StateLerp(Color, Color),
+//     DistToCenter(Color, Color),
+//     Neighbour(Color, Color),
+// }
+
+// impl ColorMethod {
+//     pub fn color(&self, states: u8, state: u8, neighbours: u8, dist_to_center: f32) -> Color {
+//         match self {
+//             ColorMethod::Single(c) => *c,
+//             ColorMethod::StateLerp(c1, c2) => {
+//                 let dt = state as f32 / states as f32;
+//                 utils::lerp_color(*c1, *c2, dt)
+//             }
+//             ColorMethod::DistToCenter(center_c, bounds_c) => {
+//                 utils::lerp_color(*center_c, *bounds_c, dist_to_center)
+//             }
+//             ColorMethod::Neighbour(c1, c2) => {
+//                 let dt = neighbours as f32 / 26f32;
+//                 utils::lerp_color(*c1, *c2, dt)
+//             }
+//         }
+//     }
+// }
+
 // Using the format from Softology's Blog (https://softologyblog.wordpress.com/2019/12/28/3d-cellular-automata-3/)
 // Example: Rule 445 is the first rule in the video and shown as 4/4/5/M. This is fairly standard survival/birth CA syntax.
 // The first 4 indicates that a state 1 cell survives if it has 4 neighbor cells.
