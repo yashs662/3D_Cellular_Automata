@@ -1,3 +1,4 @@
+use cgmath::Vector4;
 use clap::Parser;
 
 /// Initialize logging in platform dependant ways.
@@ -22,7 +23,7 @@ pub fn init_logger(debug_mode: bool) {
 #[command(
     version,
     about,
-    long_about = "A 3D cellular automata simulation using wgpu. To use any of the aliases make sure to use them with the long flag. Example: --dwg and not -dwg.",
+    long_about = "A 3D cellular automata simulation using wgpu. To use any of the aliases make sure to use them with the long flag. Example: --dwg and not -dwg."
 )]
 #[derive(Default)]
 pub struct CommandLineArgs {
@@ -38,23 +39,34 @@ pub struct CommandLineArgs {
     #[arg(short, long)]
     pub debug: bool,
     /// Set the simulation tick rate in milliseconds
-    #[arg(short, long)]
+    #[arg(long, visible_alias = "str")]
     pub simulation_tick_rate: Option<u16>,
     /// Noise level
     /// This will set the noise level for the initial spawn of the simulation.
-    #[arg(short, long)]
+    #[arg(short, long, visible_alias = "nl")]
     pub noise_level: Option<u8>,
     /// Simulation Domain Size
     /// This will set the size of the simulation domain, any instances that are outside the initial spawn size will be spawned as dead.
-    #[arg(long = "ds", visible_alias = "domain-size")]
+    #[arg(long, visible_alias = "ds")]
     pub domain_size: Option<u32>,
     /// Initial Spawn Size
     /// This will set the initial spawn size for the simulation which is less than or equal to the size of the simulation.
-    #[arg(short, long)]
+    #[arg(short, long, visible_alias = "iss")]
     pub initial_spawn_size: Option<u8>,
     /// Disable world Grid
     #[arg(short = 'w', long, visible_alias = "dwg")]
     pub disable_world_grid: bool,
+    /// Color Method to use
+    /// This will determine how the colors are calculated for the simulation.
+    /// accepts hex values or color range from 0-1 or 0-255 in three channels red green adn blue (no Alpha). Append with H for hex, 1 for 0-1, and 255 for 0-255.
+    /// The options are S (Single), SL (StateLerp), DTC (DistToCenter), N (Neighbor).
+    /// Examples:
+    /// S/H/#FF0000, S/1/1.0,0.0,0.0, S/255/255,0,0
+    /// SL/H/#FF0000/#00FF00, SL/1/1.0,0.0,0.0/0.0,1.0,0.0, SL/255/255,0,0/0,255,0
+    /// DTC/H/#FF0000/#00FF00, DTC/1/1.0,0.0,0.0/0.0,1.0,0.0, DTC/255/255,0,0/0,255,0
+    /// N/H/#FF0000/#00FF00, N/1/1.0,0.0,0.0/0.0,1.0,0.0, N/255/255,0,0/0,255,0
+    #[arg(short, long, visible_alias = "cm")]
+    pub color_method: Option<String>,
 }
 
 pub struct Validator;
@@ -140,4 +152,16 @@ impl Validator {
             (transparency * 100.0).round() / 100.0
         }
     }
+}
+
+pub fn lerp_color(color_1: Vector4<f32>, color_2: Vector4<f32>, dt: f32) -> Vector4<f32> {
+    let dt = dt.max(0.0).min(1.0);
+    let inv = 1.0 - dt;
+    let lerped = [
+        color_1.x * dt + color_2.x * inv,
+        color_1.y * dt + color_2.y * inv,
+        color_1.z * dt + color_2.z * inv,
+        color_1.w * dt + color_2.w * inv,
+    ];
+    Vector4::new(lerped[0], lerped[1], lerped[2], lerped[3])
 }

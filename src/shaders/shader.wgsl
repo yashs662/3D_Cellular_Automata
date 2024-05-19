@@ -17,7 +17,6 @@ struct InstanceInput {
     @location(4) model_matrix_3 : vec4 < f32>,
     @location(5) color : vec4 < f32>,
     @location(6) instance_state : f32,
-    @location(7) instance_fade_level : f32,
 }
 
 struct VertexOutput {
@@ -42,16 +41,12 @@ instance : InstanceInput,
     if instance.instance_state == 0.0 {
         //Dead cell
         out.color = vec4 < f32 > (0.0, 0.0, 0.0, 0.0);
-    } else if instance.instance_state == 1.0 {
+    } else if instance.instance_state == 1.0 || instance.instance_state == 2.0 {
         //Alive cell
         out.color = instance.color;
     } else {
-        //Transitioning cell apply the fade level as alpha
-        if instance.instance_fade_level < 0.0 {
-            out.color = vec4 < f32 > (0.0, 0.0, 0.0, 0.0);
-        } else {
-            out.color = vec4 < f32 > (instance.color.r, instance.color.g, instance.color.b, instance.instance_fade_level);
-        }
+        //This is not supposed to happen render as pink
+        out.color = vec4 < f32 > (1.0, 0.0, 1.0, 1.0);
     }
     return out;
 }

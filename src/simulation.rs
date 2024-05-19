@@ -1,3 +1,6 @@
+use crate::constants::DEFAULT_COLORS;
+use cgmath::Vector4;
+
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum NeighborMethod {
     /// 26 neighbors
@@ -11,6 +14,13 @@ impl NeighborMethod {
         match self {
             NeighborMethod::VonNeumann => &VON_NEUMANN_NEIGHBORS[..],
             NeighborMethod::Moore => &MOORE_NEIGHBORS[..],
+        }
+    }
+
+    pub fn total_num_neighbors(&self) -> usize {
+        match self {
+            NeighborMethod::VonNeumann => 6,
+            NeighborMethod::Moore => 26,
         }
     }
 }
@@ -77,32 +87,287 @@ pub struct CellState {
     pub fade_level: u8,
 }
 
-// #[derive(Clone)]
-// pub enum ColorMethod {
-//     Single(Color),
-//     StateLerp(Color, Color),
-//     DistToCenter(Color, Color),
-//     Neighbour(Color, Color),
-// }
+impl CellState {
+    pub fn dead() -> Self {
+        CellState {
+            state: CellStateEnum::Dead,
+            fade_level: 0,
+        }
+    }
+}
 
-// impl ColorMethod {
-//     pub fn color(&self, states: u8, state: u8, neighbours: u8, dist_to_center: f32) -> Color {
-//         match self {
-//             ColorMethod::Single(c) => *c,
-//             ColorMethod::StateLerp(c1, c2) => {
-//                 let dt = state as f32 / states as f32;
-//                 utils::lerp_color(*c1, *c2, dt)
-//             }
-//             ColorMethod::DistToCenter(center_c, bounds_c) => {
-//                 utils::lerp_color(*center_c, *bounds_c, dist_to_center)
-//             }
-//             ColorMethod::Neighbour(c1, c2) => {
-//                 let dt = neighbours as f32 / 26f32;
-//                 utils::lerp_color(*c1, *c2, dt)
-//             }
-//         }
-//     }
-// }
+/// Color Method to use
+/// This will determine how the colors are calculated for the simulation.
+/// accepts hex values or color range from 0-1 or 0-255 in three channels red green adn blue (no Alpha). Append with H for hex, 1 for 0-1, and 255 for 0-255.
+/// The options are S (Single), SL (StateLerp), DTC (DistToCenter), N (Neighbor).
+/// Examples:
+/// S/H/#FF0000, S/1/1.0,0.0,0.0, S/255/255,0,0
+/// SL/H/#FF0000/#00FF00, SL/1/1.0,0.0,0.0/0.0,1.0,0.0, SL/255/255,0,0/0,255,0
+/// DTC/H/#FF0000/#00FF00, DTC/1/1.0,0.0,0.0/0.0,1.0,0.0, DTC/255/255,0,0/0,255,0
+/// N/H/#FF0000/#00FF00, N/1/1.0,0.0,0.0/0.0,1.0,0.0, N/255/255,0,0/0,255,0
+
+#[derive(Debug)]
+enum ColorChannelEnum {
+    Red,
+    Green,
+    Blue,
+}
+
+#[derive(Debug, PartialEq)]
+pub enum ColorMethod {
+    Single(Vector4<f32>),
+    StateLerp(Vector4<f32>, Vector4<f32>),
+    DistToCenter(Vector4<f32>, Vector4<f32>),
+    Neighbor(Vector4<f32>, Vector4<f32>),
+}
+
+impl Default for ColorMethod {
+    fn default() -> Self {
+        ColorMethod::Single(Vector4::new(
+            DEFAULT_COLORS[0][0],
+            DEFAULT_COLORS[0][1],
+            DEFAULT_COLORS[0][2],
+            DEFAULT_COLORS[0][3],
+        ))
+    }
+}
+
+impl ColorMethod {
+    pub fn to_int(&self) -> u32 {
+        match self {
+            ColorMethod::Single(_) => 0,
+            ColorMethod::StateLerp(_, _) => 1,
+            ColorMethod::DistToCenter(_, _) => 2,
+            ColorMethod::Neighbor(_, _) => 3,
+        }
+    }
+
+    pub fn parse_method(method: Option<&str>) -> ColorMethod {
+        if method.is_none() {
+            log::warn!("No color method provided, using default method");
+            return ColorMethod::default();
+        }
+        let method = method.unwrap();
+        let parsed_method = {
+            let parts: Vec<&str> = method.split('/').collect();
+            if parts.len() < 3 {
+                log::error!("Invalid color method format");
+                log::warn!(
+                    "Color method format must be 'method/type/color1/color2' where color2 is optional"
+                );
+                log::warn!("Using default method");
+                return ColorMethod::default();
+            }
+            let method_type = parts[0].replace(' ', "");
+            let method_type = method_type.as_str();
+            let color_type = parts[1].replace(' ', "");
+            let color_type = color_type.as_str();
+            let color1 = parts[2].replace(' ', "");
+            let color1 = color1.as_str();
+            let color2 = parts.get(3).copied();
+
+            match method_type {
+                "S" => ColorMethod::Single(Self::parse_color(color_type, color1, true)),
+                "SL" | "DTC" | "N" => color2.map_or_else(
+                    || {
+                        log::error!(
+                            "Color method '{}' requires two colors, only one provided",
+                            method_type
+                        );
+                        log::warn!("Using default method");
+                        ColorMethod::default()
+                    },
+                    |color2| {
+                        let color2 = color2.replace(' ', "");
+                        let color2 = color2.as_str();
+
+                        match method_type {
+                            "SL" => ColorMethod::StateLerp(
+                                Self::parse_color(color_type, color1, true),
+                                Self::parse_color(color_type, color2, false),
+                            ),
+                            "DTC" => ColorMethod::DistToCenter(
+                                Self::parse_color(color_type, color1, true),
+                                Self::parse_color(color_type, color2, false),
+                            ),
+                            "N" => ColorMethod::Neighbor(
+                                Self::parse_color(color_type, color1, true),
+                                Self::parse_color(color_type, color2, false),
+                            ),
+                            _ => unreachable!(),
+                        }
+                    },
+                ),
+                _ => {
+                    log::error!("Invalid color method, must be 'S', 'SL', 'DTC', or 'N'");
+                    log::warn!("Using default method");
+                    ColorMethod::default()
+                }
+            }
+        };
+        log::debug!("Parsed color method: {:?}", parsed_method);
+        parsed_method
+    }
+
+    fn parse_color(color_type: &str, color: &str, is_color_1: bool) -> Vector4<f32> {
+        match color_type {
+            "H" => Self::parse_hex_color(color, is_color_1),
+            "1" => Self::parse_0_1_color(color, is_color_1),
+            "255" => Self::parse_0_255_color(color, is_color_1),
+            _ => {
+                log::error!("Invalid color type, must be 'H', '1', or '255'");
+                log::warn!("Using default color");
+                Self::get_default_color(is_color_1)
+            }
+        }
+    }
+
+    fn parse_hex_color(color: &str, is_color_1: bool) -> Vector4<f32> {
+        if color.len() != 7 {
+            log::error!("Invalid color format");
+            log::warn!("Color format must be '#RRGGBB'");
+            log::warn!("Using default color");
+            return Self::get_default_color(is_color_1);
+        }
+
+        let color = color.trim_start_matches('#');
+        let r = Self::parse_color_channel_for_hex(&color[0..2], is_color_1, ColorChannelEnum::Red);
+        let g =
+            Self::parse_color_channel_for_hex(&color[2..4], is_color_1, ColorChannelEnum::Green);
+        let b = Self::parse_color_channel_for_hex(&color[4..6], is_color_1, ColorChannelEnum::Blue);
+
+        Vector4::new(r, g, b, 1.0)
+    }
+
+    fn parse_color_channel_for_hex(
+        channel: &str,
+        is_color_1: bool,
+        channel_type: ColorChannelEnum,
+    ) -> f32 {
+        let parsed = u8::from_str_radix(channel, 16);
+        if parsed.is_err() {
+            log::error!("Invalid color format");
+            log::warn!("Hex code '{}' is not valid", channel);
+            log::warn!(
+                "Using default color for channel {:?} of color{}",
+                channel_type,
+                if is_color_1 { "1" } else { "2" }
+            );
+            match channel_type {
+                ColorChannelEnum::Red => return Self::get_default_color(is_color_1)[0],
+                ColorChannelEnum::Green => return Self::get_default_color(is_color_1)[1],
+                ColorChannelEnum::Blue => return Self::get_default_color(is_color_1)[2],
+            }
+        }
+        parsed.unwrap() as f32 / 255.0
+    }
+
+    fn parse_color_channel_for_0_1(
+        channel: &str,
+        is_color_1: bool,
+        channel_type: ColorChannelEnum,
+    ) -> f32 {
+        let parsed = channel.parse::<f32>();
+        if parsed.is_err() {
+            log::error!("Invalid color format");
+            log::warn!("Color must be between '0.0-1.0'");
+            log::warn!("Using default color");
+            match channel_type {
+                ColorChannelEnum::Red => return Self::get_default_color(is_color_1)[0],
+                ColorChannelEnum::Green => return Self::get_default_color(is_color_1)[1],
+                ColorChannelEnum::Blue => return Self::get_default_color(is_color_1)[2],
+            }
+        }
+        let parsed = parsed.unwrap();
+        if !(0.0..=1.0).contains(&parsed) {
+            log::error!("Invalid color format");
+            log::warn!("Color must be between '0.0-1.0'");
+            log::warn!("Using default color");
+            match channel_type {
+                ColorChannelEnum::Red => Self::get_default_color(is_color_1)[0],
+                ColorChannelEnum::Green => Self::get_default_color(is_color_1)[1],
+                ColorChannelEnum::Blue => Self::get_default_color(is_color_1)[2],
+            }
+        } else {
+            parsed
+        }
+    }
+
+    fn parse_color_channel_for_0_255(
+        channel: &str,
+        is_color_1: bool,
+        channel_type: ColorChannelEnum,
+    ) -> f32 {
+        let parsed = channel.parse::<u8>();
+        if parsed.is_err() {
+            log::error!("Invalid color format");
+            log::warn!("Color must be between '0-255'");
+            log::warn!("Using default color");
+            match channel_type {
+                ColorChannelEnum::Red => return Self::get_default_color(is_color_1)[0],
+                ColorChannelEnum::Green => return Self::get_default_color(is_color_1)[1],
+                ColorChannelEnum::Blue => return Self::get_default_color(is_color_1)[2],
+            }
+        }
+        parsed.unwrap() as f32 / 255.0
+    }
+
+    fn get_default_color(is_color_1: bool) -> Vector4<f32> {
+        if is_color_1 {
+            Vector4::new(
+                DEFAULT_COLORS[0][0],
+                DEFAULT_COLORS[0][1],
+                DEFAULT_COLORS[0][2],
+                DEFAULT_COLORS[0][3],
+            )
+        } else {
+            Vector4::new(
+                DEFAULT_COLORS[1][0],
+                DEFAULT_COLORS[1][1],
+                DEFAULT_COLORS[1][2],
+                DEFAULT_COLORS[1][3],
+            )
+        }
+    }
+
+    fn parse_0_1_color(color: &str, is_color_1: bool) -> Vector4<f32> {
+        let parts: Vec<&str> = color.split(',').collect();
+        if parts.len() != 3 {
+            log::error!("Invalid color format");
+            log::warn!("Color format must be 'R,G,B'");
+            log::warn!("Using default color");
+            return Self::get_default_color(is_color_1);
+        }
+
+        let r = Self::parse_color_channel_for_0_1(parts[0], is_color_1, ColorChannelEnum::Red);
+        let g = Self::parse_color_channel_for_0_1(parts[1], is_color_1, ColorChannelEnum::Green);
+        let b = Self::parse_color_channel_for_0_1(parts[2], is_color_1, ColorChannelEnum::Blue);
+
+        Vector4::new(r, g, b, 1.0)
+    }
+
+    fn parse_0_255_color(color: &str, is_color_1: bool) -> Vector4<f32> {
+        let parts: Vec<&str> = color.split(',').collect();
+        if parts.len() != 3 {
+            log::error!("Invalid color format");
+            log::warn!("Color format must be 'R,G,B'");
+            log::warn!("Using default color");
+            return Self::get_default_color(is_color_1);
+        }
+
+        let r = Self::parse_color_channel_for_0_255(parts[0], is_color_1, ColorChannelEnum::Red);
+        let g = Self::parse_color_channel_for_0_255(parts[1], is_color_1, ColorChannelEnum::Green);
+        let b = Self::parse_color_channel_for_0_255(parts[2], is_color_1, ColorChannelEnum::Blue);
+
+        Vector4::new(r, g, b, 1.0)
+    }
+}
+
+#[derive(Debug)]
+enum SimulationRuleParseEnum {
+    Survival,
+    Birth,
+}
 
 // Using the format from Softology's Blog (https://softologyblog.wordpress.com/2019/12/28/3d-cellular-automata-3/)
 // Example: Rule 445 is the first rule in the video and shown as 4/4/5/M. This is fairly standard survival/birth CA syntax.
@@ -111,7 +376,7 @@ pub struct CellState {
 // The 5 means each cell has 5 total states it can be in (state 4 for newly born which then fades to state 1 and then state 0 for no cell)
 // M means a Moore neighborhood.
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct SimulationRules {
     pub survival: Vec<u8>,
     pub birth: Vec<u8>,
@@ -146,15 +411,11 @@ impl SimulationRules {
     }
 
     pub fn parse_rules(rules: Option<&str>) -> SimulationRules {
-        // check if rules is empty
         if rules.is_none() {
             log::warn!("No rules provided, using default rules");
             return SimulationRules::default();
         }
         let rules = rules.unwrap();
-        let mut survival = Vec::new();
-        let mut birth = Vec::new();
-        // replace any whitespace in the string
         let parts: Vec<String> = rules.split('/').map(|part| part.replace(' ', "")).collect();
         if parts.len() != 4 {
             log::error!("Invalid rule format");
@@ -162,93 +423,21 @@ impl SimulationRules {
             log::warn!("Using default rules");
             return SimulationRules::default();
         }
-        let survival_parts: Vec<&str> = parts[0].split(',').collect();
-        // check if survival parts has only one element which is a empty string, i.e. empty rule
-        if !(survival_parts.len() == 1 && survival_parts[0].is_empty()) {
-            for part in survival_parts {
-                if part.contains('-') {
-                    let range: Vec<&str> = part.split('-').collect();
-                    let start = range[0].parse::<u8>();
-                    if start.is_err() {
-                        log::error!("Invalid rule format for part in survival rules: {}", part);
-                        log::warn!("Using default rules");
-                        return SimulationRules::default();
-                    }
-                    let start = start.unwrap();
-                    let end = range[1].parse::<u8>();
-                    if end.is_err() {
-                        log::error!("Invalid rule format for part in survival rules: {}", part);
-                        log::warn!("Using default rules");
-                        return SimulationRules::default();
-                    }
-                    let end = end.unwrap();
-                    for i in start..=end {
-                        survival.push(i);
-                    }
-                } else {
-                    let rule = part.parse::<u8>();
-                    if rule.is_err() {
-                        log::error!("Invalid rule format for part in survival rules: {}", part);
-                        log::warn!("Using default rules");
-                        return SimulationRules::default();
-                    }
-                    survival.push(rule.unwrap());
-                }
-            }
-        } else {
-            log::debug!("Survival parts {:?}", survival_parts);
-        }
-        // check if survival has any repeating values
-        if survival.len()
-            != survival
-                .iter()
-                .collect::<std::collections::HashSet<_>>()
-                .len()
-        {
-            log::error!("Survival rules contain repeating values");
+
+        let survival = Self::parse_rule_parts(&parts[0], SimulationRuleParseEnum::Survival);
+        if survival.is_err() {
+            log::error!("Invalid survival rules");
             log::warn!("Using default rules");
             return SimulationRules::default();
         }
-        let birth_parts: Vec<&str> = parts[1].split(',').collect();
-        // check if birth parts has only one element which is a empty string, i.e. empty rule
-        if !(birth_parts.len() == 1 && birth_parts[0].is_empty()) {
-            for part in birth_parts {
-                if part.contains('-') {
-                    let range: Vec<&str> = part.split('-').collect();
-                    let start = range[0].parse::<u8>();
-                    if start.is_err() {
-                        log::error!("Invalid rule format for part in birth rules: {}", part);
-                        log::warn!("Using default rules");
-                        return SimulationRules::default();
-                    }
-                    let start = start.unwrap();
-                    let end = range[1].parse::<u8>();
-                    if end.is_err() {
-                        log::error!("Invalid rule format for part in birth rules: {}", part);
-                        log::warn!("Using default rules");
-                        return SimulationRules::default();
-                    }
-                    let end = end.unwrap();
-                    for i in start..=end {
-                        birth.push(i);
-                    }
-                } else {
-                    let rule = part.parse::<u8>();
-                    if rule.is_err() {
-                        log::error!("Invalid rule format for part in birth rules: {}", part);
-                        log::warn!("Using default rules");
-                        return SimulationRules::default();
-                    }
-                    birth.push(rule.unwrap());
-                }
-            }
-        }
-        // check if birth has any repeating values
-        if birth.len() != birth.iter().collect::<std::collections::HashSet<_>>().len() {
-            log::error!("Birth rules contain repeating values");
+        let survival = survival.unwrap();
+        let birth = Self::parse_rule_parts(&parts[1], SimulationRuleParseEnum::Birth);
+        if birth.is_err() {
+            log::error!("Invalid birth rules");
             log::warn!("Using default rules");
             return SimulationRules::default();
         }
+        let birth = birth.unwrap();
         let num_states = parts[2].parse::<u8>().unwrap();
         let neighbor_method = match parts[3].as_str() {
             "M" => NeighborMethod::Moore,
@@ -261,60 +450,61 @@ impl SimulationRules {
                 return SimulationRules::default();
             }
         };
+
         let parsed_rules = SimulationRules::new(survival, birth, num_states, neighbor_method);
         log::debug!("Parsed rules: {:?}", parsed_rules);
         parsed_rules
     }
-}
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+    fn parse_rule_parts(
+        rule_parts: &str,
+        rule_to_parse: SimulationRuleParseEnum,
+    ) -> Result<Vec<u8>, ()> {
+        let parts: Vec<&str> = rule_parts.split(',').collect();
+        if parts.len() == 1 && parts[0].is_empty() {
+            log::debug!("{:?} parts {:?}", rule_to_parse, parts);
+            return Ok(Vec::new());
+        }
 
-    #[test]
-    fn test_parse_rules() {
-        let rules = SimulationRules::parse_rules(Some("4/4/5/M"));
-        assert_eq!(rules.survival, vec![4]);
-        assert_eq!(rules.birth, vec![4]);
-        assert_eq!(rules.num_states, 5);
-        assert_eq!(rules.neighbor_method, NeighborMethod::Moore);
-    }
+        let mut rules = Vec::new();
+        for part in parts {
+            if part.contains('-') {
+                let range: Vec<&str> = part.split('-').collect();
+                let start = range[0].parse::<u8>();
+                let end = range[1].parse::<u8>();
+                if start.is_err() || end.is_err() {
+                    log::error!(
+                        "Invalid rule format for part in {:?} rules: {}",
+                        rule_to_parse,
+                        part
+                    );
+                    log::warn!("Using default rules");
+                    return Err(());
+                }
+                for i in start.unwrap()..=end.unwrap() {
+                    rules.push(i);
+                }
+            } else {
+                let rule = part.parse::<u8>();
+                if rule.is_err() {
+                    log::error!(
+                        "Invalid rule format for part in {:?} rules: {}",
+                        rule_to_parse,
+                        part
+                    );
+                    log::warn!("Using default rules");
+                    return Err(());
+                }
+                rules.push(rule.unwrap());
+            }
+        }
 
-    #[test]
-    fn test_parse_rules_with_ranges() {
-        let rules = SimulationRules::parse_rules(Some("4-5/3-4/5/V"));
-        assert_eq!(rules.survival, vec![4, 5]);
-        assert_eq!(rules.birth, vec![3, 4]);
-        assert_eq!(rules.num_states, 5);
-        assert_eq!(rules.neighbor_method, NeighborMethod::VonNeumann);
-    }
+        if rules.len() != rules.iter().collect::<std::collections::HashSet<_>>().len() {
+            log::error!("{:?} rules contain repeating values", rule_to_parse);
+            log::warn!("Using default rules");
+            return Err(());
+        }
 
-    #[test]
-    fn test_parse_rules_with_weird_spacing() {
-        let rules = SimulationRules::parse_rules(Some("4,5, 10 -15 /3,4/5/V"));
-        assert_eq!(rules.survival, vec![4, 5, 10, 11, 12, 13, 14, 15]);
-        assert_eq!(rules.birth, vec![3, 4]);
-        assert_eq!(rules.num_states, 5);
-        assert_eq!(rules.neighbor_method, NeighborMethod::VonNeumann);
-    }
-
-    #[test]
-    fn test_parse_rule_with_empty_rules() {
-        let rules = SimulationRules::parse_rules(Some("//5/M"));
-        assert_eq!(rules.survival, Vec::new());
-        assert_eq!(rules.birth, Vec::new());
-        assert_eq!(rules.num_states, 5);
-        assert_eq!(rules.neighbor_method, NeighborMethod::Moore);
-    }
-
-    #[test]
-    fn test_parse_rules_invalid_format() {
-        // should return default rules
-        let rules = SimulationRules::parse_rules(Some("4,4/4/5"));
-        let default = SimulationRules::default();
-        assert_eq!(rules.survival, default.survival);
-        assert_eq!(rules.birth, default.birth);
-        assert_eq!(rules.num_states, default.num_states);
-        assert_eq!(rules.neighbor_method, default.neighbor_method);
+        Ok(rules)
     }
 }

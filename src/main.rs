@@ -2,9 +2,9 @@ use bytemuck::{Pod, Zeroable};
 use cellular_automata_3d::{
     camera::{setup_camera, Camera, CameraController, CameraUniform, Projection},
     constants::DEPTH_FORMAT,
-    simulation::{CellState, CellStateEnum, SimulationRules},
+    simulation::{CellState, CellStateEnum, ColorMethod, SimulationRules},
     texture::{self, Texture},
-    utils::{init_logger, CommandLineArgs, Validator},
+    utils::{init_logger, lerp_color, CommandLineArgs, Validator},
     vertex::Vertex,
 };
 use cgmath::{EuclideanSpace, InnerSpace, Rotation3};
@@ -68,6 +68,7 @@ pub struct Settings {
     bounding_box_active: bool,
     world_grid_active: bool,
     domain_size: u32,
+    domain_magnitude: f32,
     cube_size: f32,
     space_between_instances: f32,
     transparency: f32,
@@ -81,6 +82,7 @@ pub struct Settings {
     spawn_size: u8,
     noise_amount: u8,
     simulation_rules: SimulationRules,
+    color_method: ColorMethod,
     simulation_paused: bool,
     simulation_mode: SimulationMode,
 }
@@ -94,11 +96,13 @@ impl Default for Settings {
 impl Settings {
     pub fn new(command_line_args: CommandLineArgs) -> Self {
         let simulation_rules = SimulationRules::parse_rules(command_line_args.rules.as_deref());
+        let color_method = ColorMethod::parse_method(command_line_args.color_method.as_deref());
         let simulation_tick_rate = Validator::validate_simulation_tick_rate(
             command_line_args.simulation_tick_rate.unwrap_or(10),
         );
         let domain_size =
             Validator::validate_domain_size(command_line_args.domain_size.unwrap_or(20));
+        let domain_magnitude = Self::prepare_domain_magnitude(&domain_size);
         let spawn_size = Validator::validate_spawn_size(
             command_line_args.initial_spawn_size.unwrap_or(10),
             domain_size as u8,
@@ -137,6 +141,7 @@ impl Settings {
             bounding_box_active,
             world_grid_active,
             domain_size,
+            domain_magnitude,
             cube_size,
             space_between_instances,
             transparency,
@@ -150,6 +155,7 @@ impl Settings {
             spawn_size,
             noise_amount,
             simulation_rules,
+            color_method,
             simulation_paused,
             simulation_mode,
         }
@@ -204,7 +210,13 @@ impl Settings {
             }
         }
         self.domain_size = validated_domain_size;
+        self.domain_magnitude = Self::prepare_domain_magnitude(&self.domain_size);
         log::info!("Domain size set to: {}", self.domain_size);
+    }
+
+    pub fn prepare_domain_magnitude(domain_size: &u32) -> f32 {
+        // calculate the distance from 0,0,0 to domain_size,domain_size,domain_size
+        3.0_f32.cbrt() * *domain_size as f32
     }
 
     pub fn set_transparency(&mut self, transparency: f32, update_queue: &mut UpdateQueue) {
@@ -233,93 +245,28 @@ struct Instance {
     position: cgmath::Vector3<f32>,
     rotation: cgmath::Quaternion<f32>,
     color: cgmath::Vector4<f32>,
+    fade_to_color: cgmath::Vector4<f32>,
     instance_state: CellState,
 }
 
 impl Instance {
-    fn to_raw(self, settings: &Settings) -> InstanceRaw {
+    fn to_raw(self) -> InstanceRaw {
         let transform =
             cgmath::Matrix4::from_translation(self.position) * cgmath::Matrix4::from(self.rotation);
         InstanceRaw {
             transform: transform.into(),
             color: self.color.into(),
             instance_state: self.instance_state.state.to_int() as f32,
-            instance_death_transparency: if settings.simulation_rules.num_states > 2 {
-                if self.instance_state.state == CellStateEnum::Fading {
-                    if self.instance_state.fade_level == 0 {
-                        settings.transparency
-                    } else if self.instance_state.fade_level
-                        == settings.simulation_rules.num_states - 1
-                    {
-                        0.0
-                    } else {
-                        settings.transparency
-                            - (self.instance_state.fade_level as f32
-                                / (settings.simulation_rules.num_states - 1) as f32)
-                    }
-                } else {
-                    settings.transparency
-                }
-            } else {
-                settings.transparency
-            },
-        }
-    }
-
-    fn create_instance_at_pos(settings: &Settings, x: f32, y: f32, z: f32) -> Instance {
-        let position = cgmath::Vector3 { x, y, z };
-
-        let rotation =
-            cgmath::Quaternion::from_axis_angle(cgmath::Vector3::unit_z(), cgmath::Deg(0.0));
-
-        // TODO: use a Color Strategy pattern to determine the color
-        // give colors based on position
-        let color = cgmath::Vector4 {
-            x: (x + settings.domain_size as f32) / (settings.domain_size as f32 * 2.0),
-            y: (y + settings.domain_size as f32) / (settings.domain_size as f32 * 2.0),
-            z: (z + settings.domain_size as f32) / (settings.domain_size as f32 * 2.0),
-            w: settings.transparency,
-        };
-
-        Instance {
-            position,
-            rotation,
-            color,
-            instance_state: CellState::default(),
-        }
-    }
-
-    fn create_dead_instance_at_pos(settings: &Settings, x: f32, y: f32, z: f32) -> Instance {
-        let position = cgmath::Vector3 { x, y, z };
-
-        let rotation =
-            cgmath::Quaternion::from_axis_angle(cgmath::Vector3::unit_z(), cgmath::Deg(0.0));
-
-        // give colors based on position
-        let color = cgmath::Vector4 {
-            x: (x + settings.domain_size as f32) / (settings.domain_size as f32 * 2.0),
-            y: (y + settings.domain_size as f32) / (settings.domain_size as f32 * 2.0),
-            z: (z + settings.domain_size as f32) / (settings.domain_size as f32 * 2.0),
-            w: settings.transparency,
-        };
-
-        Instance {
-            position,
-            rotation,
-            color,
-            instance_state: CellState {
-                state: CellStateEnum::Dead,
-                fade_level: 0,
-            },
         }
     }
 
     fn create_bounding_box(settings: &Settings) -> Instance {
-        Instance::create_dead_instance_at_pos(
+        Instance::create_instance_at_pos(
             settings,
             -settings.space_between_instances,
             -settings.space_between_instances,
             -settings.space_between_instances,
+            CellState::default(),
         )
     }
 
@@ -345,6 +292,53 @@ impl Instance {
             - total_domain_size;
         (x_scaled, y_scaled, z_scaled)
     }
+
+    fn create_instance_at_pos(
+        settings: &Settings,
+        x: f32,
+        y: f32,
+        z: f32,
+        instance_state: CellState,
+    ) -> Instance {
+        let position = cgmath::Vector3 { x, y, z };
+
+        let rotation =
+            cgmath::Quaternion::from_axis_angle(cgmath::Vector3::unit_z(), cgmath::Deg(0.0));
+        match settings.color_method {
+            ColorMethod::Single(color) => Instance {
+                position,
+                rotation,
+                color,
+                fade_to_color: color,
+                instance_state,
+            },
+            ColorMethod::StateLerp(color_1, color_2) => Instance {
+                position,
+                rotation,
+                color: color_1,
+                fade_to_color: color_2,
+                instance_state,
+            },
+            ColorMethod::DistToCenter(color_1, color_2) => {
+                let lerp_amount = (position.magnitude() / settings.domain_magnitude).min(1.0);
+                let color = lerp_color(color_2, color_1, lerp_amount);
+                Instance {
+                    position,
+                    rotation,
+                    color,
+                    fade_to_color: color,
+                    instance_state,
+                }
+            }
+            ColorMethod::Neighbor(color_1, color_2) => Instance {
+                position,
+                rotation,
+                color: color_1,
+                fade_to_color: color_2,
+                instance_state,
+            },
+        }
+    }
 }
 
 #[repr(C)]
@@ -353,7 +347,6 @@ struct InstanceRaw {
     transform: [[f32; 4]; 4],
     color: [f32; 4],
     instance_state: f32,
-    instance_death_transparency: f32,
 }
 
 unsafe impl Pod for InstanceRaw {}
@@ -393,12 +386,6 @@ impl InstanceRaw {
                 wgpu::VertexAttribute {
                     offset: 5 * mem::size_of::<[f32; 4]>() as wgpu::BufferAddress,
                     shader_location: 6,
-                    format: wgpu::VertexFormat::Float32,
-                },
-                wgpu::VertexAttribute {
-                    offset: ((5 * mem::size_of::<[f32; 4]>()) + mem::size_of::<f32>())
-                        as wgpu::BufferAddress,
-                    shader_location: 7,
                     format: wgpu::VertexFormat::Float32,
                 },
             ],
@@ -479,11 +466,19 @@ impl InstanceManager {
                                     half_spawn,
                                 ) {
                                     Instance::create_instance_at_pos(
-                                        settings, x_scaled, y_scaled, z_scaled,
+                                        settings,
+                                        x_scaled,
+                                        y_scaled,
+                                        z_scaled,
+                                        CellState::default(),
                                     )
                                 } else {
-                                    Instance::create_dead_instance_at_pos(
-                                        settings, x_scaled, y_scaled, z_scaled,
+                                    Instance::create_instance_at_pos(
+                                        settings,
+                                        x_scaled,
+                                        y_scaled,
+                                        z_scaled,
+                                        CellState::dead(),
                                     )
                                 }
                             })
@@ -494,15 +489,15 @@ impl InstanceManager {
             .collect();
     }
 
-    fn prepare_raw_instance_data(&self, settings: &Settings) -> Vec<InstanceRaw> {
+    fn prepare_raw_instance_data(&self) -> Vec<InstanceRaw> {
         self.flattened
             .iter()
-            .map(|instance| Instance::to_raw(*instance, settings))
+            .map(|instance| Instance::to_raw(*instance))
             .collect::<Vec<_>>()
     }
 
-    fn create_new_buffer(&self, settings: &Settings, device: &wgpu::Device) -> wgpu::Buffer {
-        let instance_data = self.prepare_raw_instance_data(settings);
+    fn create_new_buffer(&self, device: &wgpu::Device) -> wgpu::Buffer {
+        let instance_data = self.prepare_raw_instance_data();
         device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Instance Buffer"),
             contents: bytemuck::cast_slice(&instance_data),
@@ -562,7 +557,12 @@ impl InstanceManager {
         self.flattened.len() < new_flattened_length
     }
 
-    fn handle_simulation_result(&mut self, did_something: bool, settings: &mut Settings, update_queue: &mut UpdateQueue) {
+    fn handle_simulation_result(
+        &mut self,
+        did_something: bool,
+        settings: &mut Settings,
+        update_queue: &mut UpdateQueue,
+    ) {
         if did_something {
             self.flatten(|| {
                 update_queue.add(UpdateEnum::SortInstances);
@@ -577,7 +577,7 @@ impl InstanceManager {
             settings.simulation_paused = true;
         }
     }
-    
+
     #[cfg(feature = "multithreading")]
     fn simulate(&mut self, settings: &mut Settings, update_queue: &mut UpdateQueue) {
         let instance_cache = self.instances.clone();
@@ -585,12 +585,12 @@ impl InstanceManager {
             .instances
             .par_iter_mut()
             .enumerate()
-            .map(|(x, layer)| per_thread_simulate(layer, settings, x, &instance_cache))
+            .map(|(x, layer)| Self::per_thread_simulate(layer, settings, x, &instance_cache))
             .reduce(|| false, |a, b| a || b);
-    
+
         self.handle_simulation_result(did_something, settings, update_queue);
     }
-    
+
     #[cfg(not(feature = "multithreading"))]
     fn simulate(&mut self, settings: &mut Settings, update_queue: &mut UpdateQueue) {
         let instance_cache = self.instances.clone();
@@ -598,30 +598,24 @@ impl InstanceManager {
             .instances
             .iter_mut()
             .enumerate()
-            .map(|(x, layer)| per_thread_simulate(layer, settings, x, &instance_cache))
+            .map(|(x, layer)| Self::per_thread_simulate(layer, settings, x, &instance_cache))
             .fold(false, |a, b| a || b);
-    
+
         self.handle_simulation_result(did_anything, settings, update_queue);
     }
 
-    fn update_buffer(
-        &mut self,
-        settings: &Settings,
-        queue: &wgpu::Queue,
-        instance_buffer: &wgpu::Buffer,
-    ) {
+    fn update_buffer(&mut self, queue: &wgpu::Queue, instance_buffer: &wgpu::Buffer) {
         // update the instance buffer
-        let instance_data = self.prepare_raw_instance_data(settings);
+        let instance_data = self.prepare_raw_instance_data();
         queue.write_buffer(instance_buffer, 0, bytemuck::cast_slice(&instance_data));
     }
 
     fn update_bounding_box_instance_buffer(
         &self,
-        settings: &Settings,
         queue: &wgpu::Queue,
         bounding_box_instance_buffer: &wgpu::Buffer,
     ) {
-        let instance_data = vec![self.bounding_box_instance.to_raw(settings)];
+        let instance_data = vec![self.bounding_box_instance.to_raw()];
         queue.write_buffer(
             bounding_box_instance_buffer,
             0,
@@ -705,8 +699,12 @@ impl InstanceManager {
                         // Create a new instance
                         let (x_scaled, y_scaled, z_scaled) =
                             Instance::scale_x_y_z(x, y, z, settings);
-                        Instance::create_dead_instance_at_pos(
-                            settings, x_scaled, y_scaled, z_scaled,
+                        Instance::create_instance_at_pos(
+                            settings,
+                            x_scaled,
+                            y_scaled,
+                            z_scaled,
+                            CellState::dead(),
                         )
                     } else {
                         self.instances[(x - 1) as usize][(y - 1) as usize][(z - 1) as usize]
@@ -743,75 +741,119 @@ impl InstanceManager {
         self.sort_by_distance_to_camera(camera);
         return_update_enum
     }
-}
+    fn per_thread_simulate(
+        layer: &mut [Vec<Instance>],
+        settings: &Settings,
+        x: usize,
+        instance_cache: &[Vec<Vec<Instance>>],
+    ) -> bool {
+        let mut thread_did_something = false;
+        for (y, row) in layer.iter_mut().enumerate() {
+            for (z, instance) in row.iter_mut().enumerate() {
+                let mut alive_neighbors = 0;
+                let neighbors = settings
+                    .simulation_rules
+                    .neighbor_method
+                    .get_neighbor_iter();
+                for (dx, dy, dz) in neighbors {
+                    let ix = ((x as i32 + dx) % settings.domain_size as i32
+                        + settings.domain_size as i32)
+                        % settings.domain_size as i32;
+                    let iy = ((y as i32 + dy) % settings.domain_size as i32
+                        + settings.domain_size as i32)
+                        % settings.domain_size as i32;
+                    let iz = ((z as i32 + dz) % settings.domain_size as i32
+                        + settings.domain_size as i32)
+                        % settings.domain_size as i32;
 
-fn per_thread_simulate(
-    layer: &mut [Vec<Instance>],
-    settings: &Settings,
-    x: usize,
-    instance_cache: &[Vec<Vec<Instance>>],
-) -> bool {
-    let mut thread_did_something = false;
-    for (y, row) in layer.iter_mut().enumerate() {
-        for (z, instance) in row.iter_mut().enumerate() {
-            let mut alive_neighbors = 0;
-            let neighbors = settings
-                .simulation_rules
-                .neighbor_method
-                .get_neighbor_iter();
-            for (dx, dy, dz) in neighbors {
-                let ix = ((x as i32 + dx) % settings.domain_size as i32
-                    + settings.domain_size as i32)
-                    % settings.domain_size as i32;
-                let iy = ((y as i32 + dy) % settings.domain_size as i32
-                    + settings.domain_size as i32)
-                    % settings.domain_size as i32;
-                let iz = ((z as i32 + dz) % settings.domain_size as i32
-                    + settings.domain_size as i32)
-                    % settings.domain_size as i32;
-
-                let neighbor = &instance_cache[ix as usize][iy as usize][iz as usize];
-                if neighbor.instance_state.state == CellStateEnum::Alive {
-                    alive_neighbors += 1;
+                    let neighbor = &instance_cache[ix as usize][iy as usize][iz as usize];
+                    if neighbor.instance_state.state == CellStateEnum::Alive {
+                        alive_neighbors += 1;
+                    }
                 }
-            }
 
-            match instance.instance_state.state {
-                CellStateEnum::Alive => {
-                    if !settings
-                        .simulation_rules
-                        .survival
-                        .contains(&alive_neighbors)
-                    {
-                        if settings.simulation_rules.num_states > 2 {
-                            instance.instance_state.state = CellStateEnum::Fading;
-                        } else {
+                match instance.instance_state.state {
+                    CellStateEnum::Alive => {
+                        if !settings
+                            .simulation_rules
+                            .survival
+                            .contains(&alive_neighbors)
+                        {
+                            if settings.simulation_rules.num_states > 2 {
+                                instance.instance_state.state = CellStateEnum::Fading;
+                            } else {
+                                instance.instance_state.state = CellStateEnum::Dead;
+                            }
+                            thread_did_something = true;
+                        }
+                    }
+                    CellStateEnum::Fading => {
+                        if instance.instance_state.fade_level
+                            >= settings.simulation_rules.num_states
+                        {
                             instance.instance_state.state = CellStateEnum::Dead;
+                        } else if instance.instance_state.fade_level
+                            < settings.simulation_rules.num_states
+                        {
+                            instance.instance_state.fade_level += 1;
+                            instance.color = match settings.color_method {
+                                ColorMethod::Single(c) => {
+                                    let instance_transparency =
+                                        if settings.simulation_rules.num_states > 2 {
+                                            if instance.instance_state.fade_level == 0 {
+                                                settings.transparency
+                                            } else if instance.instance_state.fade_level
+                                                == settings.simulation_rules.num_states - 1
+                                            {
+                                                0.0
+                                            } else {
+                                                settings.transparency
+                                                    - (instance.instance_state.fade_level as f32
+                                                        / (settings.simulation_rules.num_states - 1)
+                                                            as f32)
+                                            }
+                                        } else {
+                                            settings.transparency
+                                        };
+                                    cgmath::Vector4::new(c.x, c.y, c.z, instance_transparency)
+                                }
+                                ColorMethod::StateLerp(c1, c2) => {
+                                    let dt = (instance.instance_state.fade_level
+                                        / (settings.simulation_rules.num_states - 1))
+                                        as f32;
+                                    lerp_color(c2, c1, dt)
+                                }
+                                ColorMethod::DistToCenter(c1, c2) => {
+                                    let lerp_amount = (instance.position.magnitude()
+                                        / settings.domain_magnitude)
+                                        .min(1.0);
+                                    lerp_color(c2, c1, lerp_amount)
+                                }
+                                ColorMethod::Neighbor(c1, c2) => {
+                                    let dt = alive_neighbors as f32
+                                        / settings
+                                            .simulation_rules
+                                            .neighbor_method
+                                            .total_num_neighbors()
+                                            as f32;
+                                    lerp_color(c2, c1, dt)
+                                }
+                            }
                         }
                         thread_did_something = true;
                     }
-                }
-                CellStateEnum::Fading => {
-                    if instance.instance_state.fade_level >= settings.simulation_rules.num_states {
-                        instance.instance_state.state = CellStateEnum::Dead;
-                    } else if instance.instance_state.fade_level
-                        < settings.simulation_rules.num_states
-                    {
-                        instance.instance_state.fade_level += 1;
-                    }
-                    thread_did_something = true;
-                }
-                CellStateEnum::Dead => {
-                    if settings.simulation_rules.birth.contains(&alive_neighbors) {
-                        instance.instance_state.state = CellStateEnum::Alive;
-                        instance.instance_state.fade_level = 0;
-                        thread_did_something = true;
+                    CellStateEnum::Dead => {
+                        if settings.simulation_rules.birth.contains(&alive_neighbors) {
+                            instance.instance_state.state = CellStateEnum::Alive;
+                            instance.instance_state.fade_level = 0;
+                            thread_did_something = true;
+                        }
                     }
                 }
             }
         }
+        thread_did_something
     }
-    thread_did_something
 }
 
 struct App {
@@ -947,22 +989,16 @@ impl App {
                         &self.bounding_box_vertex_buf,
                     );
                     self.instance_manager.update_bounding_box_instance_buffer(
-                        &self.settings,
                         gpu_queue,
                         &self.bounding_box_instance_buffer,
                     );
                 }
                 UpdateEnum::UpdateBuffer => {
-                    self.instance_manager.update_buffer(
-                        &self.settings,
-                        gpu_queue,
-                        &self.instance_buffer,
-                    );
+                    self.instance_manager
+                        .update_buffer(gpu_queue, &self.instance_buffer);
                 }
                 UpdateEnum::CreateNewBuffer => {
-                    self.instance_buffer = self
-                        .instance_manager
-                        .create_new_buffer(&self.settings, device);
+                    self.instance_buffer = self.instance_manager.create_new_buffer(device);
                 }
             }
         }
@@ -1027,13 +1063,13 @@ impl cellular_automata_3d::framework::App for App {
         ) = setup_camera(config, device);
 
         instance_manager.sort_by_distance_to_camera(&camera);
-        let instance_buffer = instance_manager.create_new_buffer(&settings, device);
+        let instance_buffer = instance_manager.create_new_buffer(device);
 
         let bounding_box_instance = Instance::create_bounding_box(&settings);
         let bounding_box_instance_buffer =
             device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("Bounding Box Instance Buffer"),
-                contents: bytemuck::cast_slice(&[bounding_box_instance.to_raw(&settings)]),
+                contents: bytemuck::cast_slice(&[bounding_box_instance.to_raw()]),
                 usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             });
 
