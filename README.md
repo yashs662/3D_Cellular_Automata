@@ -10,7 +10,6 @@ A multithreaded 3D cellular automata implementation in Rust with wgpu
 
 ## TODO
 
-- [ ] Allow for predefined colors to be used from the CLI
 - [ ] Limit how fast a user can spam the keys to avoid trying to access for e.g. self.instances before increase_num_instances has finished
 - [ ] Add Easing Functions for Color Lerp
 - [ ] Text GUI for changing the rules, showing keybindings, etc

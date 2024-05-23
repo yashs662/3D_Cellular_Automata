@@ -1,5 +1,6 @@
-use crate::constants::DEFAULT_COLORS;
+use crate::{constants::DEFAULT_COLORS, utils::Color};
 use cgmath::Vector4;
+use std::str::FromStr;
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum NeighborMethod {
@@ -98,14 +99,26 @@ impl CellState {
 
 /// Color Method to use
 /// This will determine how the colors are calculated for the simulation.
-/// accepts hex values or color range from 0-1 or 0-255 in three channels red green adn blue (no Alpha). Append with H for hex, 1 for 0-1, and 255 for 0-255.
+/// accepts hex values or color range from 0-1 or 0-255 in three channels red green adn blue (no Alpha).
+/// Append with H for hex, 1 for 0-1, 255 for 0-255, and D for predefined colors. you can use predefined colors with
+/// any option to mix and match but can only use predefined colors when using the D option.
 /// The options are S (Single), SL (StateLerp), DTC (DistToCenter), N (Neighbor).
+///
 /// Examples:
-/// S/H/#FF0000, S/1/1.0,0.0,0.0, S/255/255,0,0
-/// SL/H/#FF0000/#00FF00, SL/1/1.0,0.0,0.0/0.0,1.0,0.0, SL/255/255,0,0/0,255,0
-/// DTC/H/#FF0000/#00FF00, DTC/1/1.0,0.0,0.0/0.0,1.0,0.0, DTC/255/255,0,0/0,255,0
-/// N/H/#FF0000/#00FF00, N/1/1.0,0.0,0.0/0.0,1.0,0.0, N/255/255,0,0/0,255,0
-
+/// S/H/#FF0000,
+/// S/1/1.0,0.0,0.0,
+/// S/255/255,0,0,
+/// SL/H/#FF0000/#00FF00,
+/// SL/1/1.0,0.0,0.0/0.0,1.0,0.0,
+/// SL/255/255,0,0/0,255,0,
+/// DTC/H/#FF0000/#00FF00,
+/// DTC/1/1.0,0.0,0.0/0.0,1.0,0.0,
+/// DTC/255/255,0,0/0,255,0,
+/// N/H/#FF0000/#00FF00,
+/// N/1/1.0,0.0,0.0/0.0,1.0,0.0,
+/// N/255/255,0,0/0,255,0,
+/// SL/D/Red/Green,
+/// SL/H/#FF0000/Green
 #[derive(Debug)]
 enum ColorChannelEnum {
     Red,
@@ -214,6 +227,7 @@ impl ColorMethod {
             "H" => Self::parse_hex_color(color, is_color_1),
             "1" => Self::parse_0_1_color(color, is_color_1),
             "255" => Self::parse_0_255_color(color, is_color_1),
+            "D" => Self::parse_predefined_color(color, is_color_1),
             _ => {
                 log::error!("Invalid color type, must be 'H', '1', or '255'");
                 log::warn!("Using default color");
@@ -222,12 +236,30 @@ impl ColorMethod {
         }
     }
 
-    fn parse_hex_color(color: &str, is_color_1: bool) -> Vector4<f32> {
-        if color.len() != 7 {
-            log::error!("Invalid color format");
-            log::warn!("Color format must be '#RRGGBB'");
+    fn parse_predefined_color(color: &str, is_color_1: bool) -> Vector4<f32> {
+        let predefined_color = Color::from_str(color);
+        if predefined_color.is_ok() {
+            let color = predefined_color.unwrap().value();
+            Vector4::new(color[0], color[1], color[2], 1.0)
+        } else {
+            log::error!("{} No such color exists in Default Colors", color);
             log::warn!("Using default color");
-            return Self::get_default_color(is_color_1);
+            Self::get_default_color(is_color_1)
+        }
+    }
+
+    fn parse_hex_color(color: &str, is_color_1: bool) -> Vector4<f32> {
+        if color.len() != 7 || !color.starts_with('#') {
+            let predefined_color = Color::from_str(color);
+            if predefined_color.is_ok() {
+                let color = predefined_color.unwrap().value();
+                return Vector4::new(color[0], color[1], color[2], 1.0);
+            } else {
+                log::error!("Invalid color format");
+                log::warn!("Color format must be '#RRGGBB' or a predefined color");
+                log::warn!("Using default color");
+                return Self::get_default_color(is_color_1);
+            }
         }
 
         let color = color.trim_start_matches('#');
@@ -333,10 +365,19 @@ impl ColorMethod {
     fn parse_0_1_color(color: &str, is_color_1: bool) -> Vector4<f32> {
         let parts: Vec<&str> = color.split(',').collect();
         if parts.len() != 3 {
-            log::error!("Invalid color format");
-            log::warn!("Color format must be 'R,G,B'");
-            log::warn!("Using default color");
-            return Self::get_default_color(is_color_1);
+            let predefined_color = Color::from_str(color);
+            if predefined_color.is_ok() {
+                log::debug!("predefined color {:?}", predefined_color);
+                let color = predefined_color.unwrap().value();
+                return Vector4::new(color[0], color[1], color[2], 1.0);
+            } else {
+                log::error!("Invalid color format");
+                log::warn!(
+                    "Color format must be 'R,G,B' in the range 0.0 - 1.0 <Float> or a predefined color"
+                );
+                log::warn!("Using default color");
+                return Self::get_default_color(is_color_1);
+            }
         }
 
         let r = Self::parse_color_channel_for_0_1(parts[0], is_color_1, ColorChannelEnum::Red);
@@ -349,10 +390,19 @@ impl ColorMethod {
     fn parse_0_255_color(color: &str, is_color_1: bool) -> Vector4<f32> {
         let parts: Vec<&str> = color.split(',').collect();
         if parts.len() != 3 {
-            log::error!("Invalid color format");
-            log::warn!("Color format must be 'R,G,B'");
-            log::warn!("Using default color");
-            return Self::get_default_color(is_color_1);
+            let predefined_color = Color::from_str(color);
+            if predefined_color.is_ok() {
+                log::debug!("predefined color {:?}", predefined_color);
+                let color = predefined_color.unwrap().value();
+                return Vector4::new(color[0], color[1], color[2], 1.0);
+            } else {
+                log::error!("Invalid color format");
+                log::warn!(
+                    "Color format must be 'R,G,B' in the range 0 - 255 <Int> or a predefined color"
+                );
+                log::warn!("Using default color");
+                return Self::get_default_color(is_color_1);
+            }
         }
 
         let r = Self::parse_color_channel_for_0_255(parts[0], is_color_1, ColorChannelEnum::Red);
@@ -370,12 +420,14 @@ enum SimulationRuleParseEnum {
 }
 
 // Using the format from Softology's Blog (https://softologyblog.wordpress.com/2019/12/28/3d-cellular-automata-3/)
-// Example: Rule 445 is the first rule in the video and shown as 4/4/5/M. This is fairly standard survival/birth CA syntax.
-// The first 4 indicates that a state 1 cell survives if it has 4 neighbor cells.
-// The second 4 indicates that a cell is born in an empty location if it has 4 neighbors.
-// The 5 means each cell has 5 total states it can be in (state 4 for newly born which then fades to state 1 and then state 0 for no cell)
-// M means a Moore neighborhood.
-
+/// The rules for the simulation in the format S/B/N/M"
+/// where S is the survival rules, B is the birth rules, N is the number of states, and M is the neighbor method.
+/// survival and birth can be in the format 0-2,4,6-11,13-17,21-26/9-10,16,23-24. where - is a range between <x>-<y> and , is a list of numbers.
+/// N is a number between 1 and 255 and the last is either M or V for Von Neumann or Moore neighborhood.
+///
+/// Example:
+/// 4/4/5/M
+/// 2,6,9/4,6,8-10/10/M
 #[derive(Clone, Debug, PartialEq)]
 pub struct SimulationRules {
     pub survival: Vec<u8>,

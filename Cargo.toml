@@ -1,7 +1,10 @@
 [package]
 name = "cellular_automata_3d"
-version = "0.3.1"
+version = "0.4.0"
 edition = "2021"
+authors = ["Yash Sharma <yashs662@gmail.com>"]
+description = "A 3D cellular automata simulation using wgpu"
+repository = "https://github.com/yashs662/3D_Cellular_Automata"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -17,8 +20,9 @@ glam = "0.27.0"
 cgmath = "0.18.0"
 rayon = { version = "1.10.0", optional = true }
 clap = { version = "4.5.4", features = ["derive"] }
-human-panic = "2.0.0"
 palette = "0.7.6"
+strum = { version = "0.26.2", features = ["derive"] }
+colored = "2.1.0"
 
 [features]
 default = ["multithreading"]

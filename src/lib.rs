@@ -1,6 +1,7 @@
 pub mod camera;
 pub mod constants;
 pub mod framework;
+pub mod instance;
 pub mod simulation;
 pub mod test;
 pub mod texture;

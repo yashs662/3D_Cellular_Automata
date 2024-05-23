@@ -1,3 +1,7 @@
+use crate::{
+    simulation::{ColorMethod, SimulationRules},
+    utils::{CommandLineArgs, UpdateEnum, UpdateQueue, Validator},
+};
 use std::{sync::Arc, time::Instant};
 use wgpu::Surface;
 use winit::{
@@ -7,8 +11,6 @@ use winit::{
     keyboard::{Key, NamedKey},
     window::Window,
 };
-
-use crate::utils::CommandLineArgs;
 
 pub trait App: 'static + Sized {
     const SRGB: bool = true;
@@ -414,4 +416,196 @@ async fn start<E: App>(title: &str, command_line_args: CommandLineArgs) {
 
 pub fn run<E: App>(title: &'static str, command_line_args: CommandLineArgs) {
     pollster::block_on(start::<E>(title, command_line_args));
+}
+
+#[derive(Debug, PartialEq)]
+pub enum SimulationMode {
+    SingleThreaded,
+    #[cfg(feature = "multithreading")]
+    MultiThreaded,
+    // Gpu,
+}
+
+// Allow Dead Code as multithreading uses simulation mode but when rayon is not enabled it is not used
+#[allow(dead_code)]
+pub struct Settings {
+    pub bounding_box_active: bool,
+    pub world_grid_active: bool,
+    pub help_gui_active: bool,
+    pub domain_size: u32,
+    pub max_domain_size: u32,
+    pub domain_magnitude: f32,
+    pub cube_size: f32,
+    pub space_between_instances: f32,
+    pub transparency: f32,
+    pub num_instances_step_size: u32,
+    pub transparency_step_size: f32,
+    pub space_between_step_size: f32,
+    pub angle_threshold_for_sort: f32,
+    pub translation_threshold_for_sort: f32,
+    pub simulation_tick_rate: u16,
+    pub last_simulation_tick: std::time::Instant,
+    pub spawn_size: u8,
+    pub noise_amount: u8,
+    pub simulation_rules: SimulationRules,
+    pub color_method: ColorMethod,
+    pub simulation_paused: bool,
+    pub simulation_mode: SimulationMode,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self::new(CommandLineArgs::default())
+    }
+}
+
+impl Settings {
+    pub fn new(command_line_args: CommandLineArgs) -> Self {
+        let simulation_rules = SimulationRules::parse_rules(command_line_args.rules.as_deref());
+        let color_method = ColorMethod::parse_method(command_line_args.color_method.as_deref());
+        let simulation_tick_rate = Validator::validate_simulation_tick_rate(
+            command_line_args.simulation_tick_rate.unwrap_or(10),
+        );
+        let domain_size =
+            Validator::validate_domain_size(command_line_args.domain_size.unwrap_or(20));
+        let domain_magnitude = Self::prepare_domain_magnitude(&domain_size);
+        let spawn_size = Validator::validate_spawn_size(
+            command_line_args.initial_spawn_size.unwrap_or(10),
+            domain_size as u8,
+        );
+        // Add 1 to avoid no noise on setting noise to 1 as it will calculate random offset from 0 to 1
+        // which is not visible in the grid, hence we need at least 2 to see the noise
+        let noise_amount =
+            (Validator::validate_noise_amount(command_line_args.noise_level.unwrap_or(0)) + 1)
+                .min(10);
+
+        let bounding_box_active = false;
+        let world_grid_active = !command_line_args.disable_world_grid;
+        let help_gui_active = false;
+        let cube_size = 1.0;
+        let space_between_instances = 0.1;
+        let transparency = 0.1;
+        let num_instances_step_size = 2;
+        let transparency_step_size = 0.1;
+        let space_between_step_size = 0.05;
+        let angle_threshold_for_sort = 0.10;
+        let translation_threshold_for_sort = 10.0;
+        let max_domain_size = 100;
+        let last_simulation_tick = std::time::Instant::now();
+        let simulation_paused = true; // Start simulation paused
+
+        #[cfg(feature = "multithreading")]
+        let simulation_mode = SimulationMode::MultiThreaded;
+
+        #[cfg(not(feature = "multithreading"))]
+        let simulation_mode = SimulationMode::SingleThreaded;
+
+        log::debug!("Setting simulation tick rate to: {}", simulation_tick_rate);
+        log::debug!("Setting domain size to: {}", domain_size);
+        log::debug!("Setting initial spawn size to: {}", spawn_size);
+        log::debug!("Setting noise level to: {}", noise_amount);
+
+        Settings {
+            bounding_box_active,
+            world_grid_active,
+            help_gui_active,
+            domain_size,
+            max_domain_size,
+            domain_magnitude,
+            cube_size,
+            space_between_instances,
+            transparency,
+            num_instances_step_size,
+            transparency_step_size,
+            space_between_step_size,
+            angle_threshold_for_sort,
+            translation_threshold_for_sort,
+            simulation_tick_rate,
+            last_simulation_tick,
+            spawn_size,
+            noise_amount,
+            simulation_rules,
+            color_method,
+            simulation_paused,
+            simulation_mode,
+        }
+    }
+
+    #[cfg(feature = "multithreading")]
+    pub fn next_simulation_mode(&mut self) {
+        self.simulation_mode = match self.simulation_mode {
+            SimulationMode::SingleThreaded => SimulationMode::MultiThreaded,
+            SimulationMode::MultiThreaded => SimulationMode::SingleThreaded,
+            // SimulationMode::Gpu => SimulationMode::SingleThreaded,
+        };
+        log::info!("Simulation mode set to: {:?}", self.simulation_mode);
+    }
+
+    #[cfg(not(feature = "multithreading"))]
+    pub fn next_simulation_mode(&mut self) {
+        log::warn!("Multithreading feature is not enabled, cannot switch to multi-threaded mode");
+    }
+
+    pub fn toggle_bounding_box(&mut self) {
+        self.bounding_box_active = !self.bounding_box_active;
+        log::info!("Wireframe overlay set to: {}", self.bounding_box_active);
+    }
+
+    pub fn toggle_world_grid(&mut self) {
+        self.world_grid_active = !self.world_grid_active;
+        log::info!("World grid display set to: {}", self.world_grid_active);
+    }
+
+    pub fn toggle_pause_simulation(&mut self) {
+        self.simulation_paused = !self.simulation_paused;
+        if self.simulation_paused {
+            log::info!("Simulation paused");
+        } else {
+            log::info!("Simulation resumed");
+        }
+    }
+
+    pub fn set_domain_size(&mut self, domain_size: u32, update_queue: &mut UpdateQueue) {
+        let validated_domain_size = Validator::validate_domain_size(domain_size);
+
+        match validated_domain_size.cmp(&self.domain_size) {
+            std::cmp::Ordering::Less => {
+                update_queue.add(UpdateEnum::NumInstancesDecreased);
+            }
+            std::cmp::Ordering::Greater => {
+                update_queue.add(UpdateEnum::NumInstancesIncreased);
+            }
+            std::cmp::Ordering::Equal => {
+                // No change
+            }
+        }
+        self.domain_size = validated_domain_size;
+        self.domain_magnitude = Self::prepare_domain_magnitude(&self.domain_size);
+        log::info!("Domain size set to: {}", self.domain_size);
+    }
+
+    pub fn prepare_domain_magnitude(domain_size: &u32) -> f32 {
+        // calculate the distance from 0,0,0 to domain_size,domain_size,domain_size
+        3.0_f32.cbrt() * *domain_size as f32
+    }
+
+    pub fn set_transparency(&mut self, transparency: f32, update_queue: &mut UpdateQueue) {
+        self.transparency = Validator::validate_transparency(transparency);
+        log::info!("Transparency set to: {}", self.transparency);
+        update_queue.add(UpdateEnum::Transparency);
+    }
+
+    pub fn set_space_between_instances(
+        &mut self,
+        space_between_instances: f32,
+        update_queue: &mut UpdateQueue,
+    ) {
+        self.space_between_instances =
+            Validator::validate_space_between_instances(space_between_instances);
+        log::info!(
+            "Space between instances set to: {}",
+            (self.space_between_instances * 100.0).round() / 100.0
+        );
+        update_queue.add(UpdateEnum::SpaceBetweenInstances);
+    }
 }
