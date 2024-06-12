@@ -39,7 +39,9 @@ pub trait App: 'static + Sized {
         config: &wgpu::SurfaceConfiguration,
         adapter: &wgpu::Adapter,
         device: &wgpu::Device,
+        queue: &wgpu::Queue,
         command_line_args: &CommandLineArgs,
+        scale_factor: f64,
     ) -> Self;
 
     fn resize(
@@ -49,13 +51,15 @@ pub trait App: 'static + Sized {
         queue: &wgpu::Queue,
     );
 
-    fn update(&mut self, dt: f32, queue: &wgpu::Queue, device: &wgpu::Device);
+    fn update(&mut self, dt: f32, avg_fps: f32, queue: &wgpu::Queue, device: &wgpu::Device);
 
     fn update_window_event(&mut self, event: WindowEvent);
 
     fn update_device_event(&mut self, event: DeviceEvent);
 
     fn render(&mut self, view: &wgpu::TextureView, device: &wgpu::Device, queue: &wgpu::Queue);
+
+    fn trim_atlas(&mut self);
 }
 
 struct EventLoopWrapper {
@@ -276,14 +280,18 @@ struct FrameCounter {
     // Number of frames since the last time we printed the frame time.
     frame_count: u32,
     frame_time: f32,
+    avg_fps: f32,
+    report_interval: f32,
 }
 
 impl FrameCounter {
-    fn new() -> Self {
+    fn new(report_interval: f32) -> Self {
         Self {
             last_printed_instant: Instant::now(),
             frame_count: 0,
             frame_time: 0.0,
+            avg_fps: 0.0,
+            report_interval,
         }
     }
 
@@ -291,28 +299,33 @@ impl FrameCounter {
         self.frame_count += 1;
         let new_instant = Instant::now();
         let elapsed_secs = (new_instant - self.last_printed_instant).as_secs_f32();
-        if elapsed_secs > 1.0 {
+        if elapsed_secs > self.report_interval {
             let elapsed_ms = elapsed_secs * 1000.0;
             let frame_time = elapsed_ms / self.frame_count as f32;
             let fps = self.frame_count as f32 / elapsed_secs;
-            log::info!("Frame time {:.2}ms ({:.1} FPS)", frame_time, fps);
+            // log::info!("Frame time {:.2}ms ({:.1} FPS)", frame_time, fps);
 
             self.last_printed_instant = new_instant;
             self.frame_count = 0;
             self.frame_time = frame_time;
+            self.avg_fps = fps;
         }
     }
 
     fn get_frame_time(&self) -> f32 {
         self.frame_time
     }
+
+    fn get_avg_fps(&self) -> f32 {
+        self.avg_fps
+    }
 }
 
-async fn start<E: App>(title: &str, command_line_args: CommandLineArgs) {
+pub async fn start<E: App>(title: &str, command_line_args: CommandLineArgs) {
     let window_loop = EventLoopWrapper::new(title);
     let mut surface = SurfaceWrapper::new();
     let context = AppContext::init_async::<E>(&mut surface, window_loop.window.clone()).await;
-    let mut frame_counter = FrameCounter::new();
+    let mut frame_counter = FrameCounter::new(0.1);
 
     // We wait to create the app until we have a valid surface.
     let mut app = None;
@@ -331,7 +344,9 @@ async fn start<E: App>(title: &str, command_line_args: CommandLineArgs) {
                             surface.config(),
                             &context.adapter,
                             &context.device,
-                            &command_line_args
+                            &context.queue,
+                            &command_line_args,
+                            window_loop.window.scale_factor(),
                         ));
                     }
                 }
@@ -389,7 +404,7 @@ async fn start<E: App>(title: &str, command_line_args: CommandLineArgs) {
                         }
 
                         frame_counter.update();
-                        app.as_mut().unwrap().update(frame_counter.get_frame_time(), &context.queue, &context.device);
+                        app.as_mut().unwrap().update(frame_counter.get_frame_time(), frame_counter.get_avg_fps(), &context.queue, &context.device);
                         let frame = surface.acquire(&context);
                         let view = frame.texture.create_view(&wgpu::TextureViewDescriptor {
                             format: Some(surface.config().view_formats[0]),
@@ -402,7 +417,7 @@ async fn start<E: App>(title: &str, command_line_args: CommandLineArgs) {
                             .render(&view, &context.device, &context.queue);
 
                         frame.present();
-
+                        app.as_mut().unwrap().trim_atlas();
                         window_loop.window.request_redraw();
                     }
                     _ => app.as_mut().unwrap().update_window_event(event),
@@ -412,10 +427,6 @@ async fn start<E: App>(title: &str, command_line_args: CommandLineArgs) {
         },
     );
     log::info!("Event loop ended with result {:?}", loop_result);
-}
-
-pub fn run<E: App>(title: &'static str, command_line_args: CommandLineArgs) {
-    pollster::block_on(start::<E>(title, command_line_args));
 }
 
 #[derive(Debug, PartialEq)]

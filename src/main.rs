@@ -9,9 +9,7 @@ use cellular_automata_3d::{
 };
 use cgmath::InnerSpace;
 use clap::Parser;
-use colored::Colorize;
 use std::{borrow::Cow, f32::consts, mem};
-use strum::IntoEnumIterator;
 use wgpu::{util::DeviceExt, PipelineCompilationOptions};
 use winit::{
     event::{DeviceEvent, ElementState, KeyEvent, MouseButton, WindowEvent},
@@ -35,6 +33,158 @@ struct AppRenderPipelines {
     pub bounding_box: Option<wgpu::RenderPipeline>,
     pub world_grid: wgpu::RenderPipeline,
     pub world_grid_overlay: wgpu::RenderPipeline,
+}
+
+enum TextRenderLevel {
+    Debug,
+    Info,
+    Warning,
+    Error,
+}
+
+impl TextRenderLevel {
+    pub fn color(&self) -> glyphon::Color {
+        match self {
+            TextRenderLevel::Debug => Color::Green.to_glyphon_color(),
+            TextRenderLevel::Info => Color::White.to_glyphon_color(),
+            TextRenderLevel::Warning => Color::Orange.to_glyphon_color(),
+            TextRenderLevel::Error => Color::Red.to_glyphon_color(),
+        }
+    }
+}
+
+struct TextRenderer {
+    font_system: glyphon::FontSystem,
+    swash_cache: glyphon::SwashCache,
+    viewport: glyphon::Viewport,
+    text_renderer: glyphon::TextRenderer,
+    atlas: glyphon::TextAtlas,
+    fps_buffer: glyphon::Buffer,
+    fps_level: TextRenderLevel,
+}
+
+impl TextRenderer {
+    pub fn new(
+        device: &wgpu::Device,
+        config: &wgpu::SurfaceConfiguration,
+        queue: &wgpu::Queue,
+        scale_factor: f64,
+    ) -> Self {
+        let mut font_system = glyphon::FontSystem::new();
+        let swash_cache = glyphon::SwashCache::new();
+        let cache = glyphon::Cache::new(device);
+        let mut viewport = glyphon::Viewport::new(device, &cache);
+        let mut atlas = glyphon::TextAtlas::new(device, queue, &cache, config.format);
+        let text_renderer = glyphon::TextRenderer::new(
+            &mut atlas,
+            device,
+            wgpu::MultisampleState::default(),
+            Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: true,
+                depth_compare: wgpu::CompareFunction::Less,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+        );
+        let mut buffer = glyphon::Buffer::new(&mut font_system, glyphon::Metrics::new(20.0, 20.0));
+
+        let physical_width = (config.width as f64 * scale_factor) as f32;
+        let physical_height = (config.height as f64 * scale_factor) as f32;
+
+        viewport.update(
+            queue,
+            glyphon::Resolution {
+                width: config.width,
+                height: config.height,
+            },
+        );
+        buffer.set_size(&mut font_system, physical_width, physical_height);
+        buffer.set_text(
+            &mut font_system,
+            "Frame time 0.00ms (0.0 FPS)",
+            glyphon::Attrs::new().family(glyphon::Family::SansSerif),
+            glyphon::Shaping::Advanced,
+        );
+        buffer.shape_until_scroll(&mut font_system, false);
+
+        Self {
+            font_system,
+            swash_cache,
+            viewport,
+            text_renderer,
+            atlas,
+            fps_buffer: buffer,
+            fps_level: TextRenderLevel::Warning,
+        }
+    }
+
+    pub fn update_viewport_size(
+        &mut self,
+        config: &wgpu::SurfaceConfiguration,
+        queue: &wgpu::Queue,
+    ) {
+        self.viewport.update(
+            queue,
+            glyphon::Resolution {
+                width: config.width,
+                height: config.height,
+            },
+        );
+    }
+
+    pub fn render<'a>(
+        &'a mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        render_pass: &mut wgpu::RenderPass<'a>,
+    ) {
+        let fps_text_area = glyphon::TextArea {
+            buffer: &self.fps_buffer,
+            left: 10.0,
+            top: 10.0,
+            scale: 1.0,
+            bounds: glyphon::TextBounds::default(),
+            default_color: self.fps_level.color(),
+        };
+
+        self.text_renderer
+            .prepare(
+                device,
+                queue,
+                &mut self.font_system,
+                &mut self.atlas,
+                &self.viewport,
+                [fps_text_area],
+                &mut self.swash_cache,
+            )
+            .unwrap();
+
+        self.text_renderer
+            .render(&self.atlas, &self.viewport, render_pass)
+            .unwrap();
+    }
+
+    pub fn trim_atlas(&mut self) {
+        self.atlas.trim();
+    }
+
+    pub fn update(&mut self, frame_time: f32, fps: f32) {
+        if fps < 30.0 {
+            self.fps_level = TextRenderLevel::Error;
+        } else if fps < 60.0 {
+            self.fps_level = TextRenderLevel::Warning;
+        } else {
+            self.fps_level = TextRenderLevel::Info;
+        }
+        self.fps_buffer.set_text(
+            &mut self.font_system,
+            &format!("Frame time {:.2}ms ({:.1} FPS)", frame_time, fps),
+            glyphon::Attrs::new().family(glyphon::Family::SansSerif),
+            glyphon::Shaping::Advanced,
+        );
+        self.fps_buffer.shape_until_scroll(&mut self.font_system, false);
+    }
 }
 
 #[repr(C)]
@@ -100,6 +250,7 @@ struct App {
     world_grid_vertices: Vec<Vertex>,
     buffers: AppBuffers,
     pipelines: AppRenderPipelines,
+    text_renderer: TextRenderer,
 }
 
 impl App {
@@ -255,7 +406,9 @@ impl cellular_automata_3d::framework::App for App {
         config: &wgpu::SurfaceConfiguration,
         _adapter: &wgpu::Adapter,
         device: &wgpu::Device,
+        queue: &wgpu::Queue,
         command_line_args: &CommandLineArgs,
+        scale_factor: f64,
     ) -> Self {
         let settings = Settings::new(command_line_args.clone());
         // Create the vertex and index buffers
@@ -620,6 +773,7 @@ impl cellular_automata_3d::framework::App for App {
             world_grid_vertices,
             buffers,
             pipelines,
+            text_renderer: TextRenderer::new(device, config, queue, scale_factor),
         }
     }
 
@@ -706,13 +860,14 @@ impl cellular_automata_3d::framework::App for App {
         }
     }
 
-    fn update(&mut self, dt: f32, queue: &wgpu::Queue, device: &wgpu::Device) {
+    fn update(&mut self, dt: f32, avg_fps: f32, queue: &wgpu::Queue, device: &wgpu::Device) {
         self.update_camera(dt, queue);
         self.transparency_update();
         self.queue_update(queue, device);
         self.simulation_update();
         // For any Scheduled updates
         self.queue_update(queue, device);
+        self.text_renderer.update(dt, avg_fps);
     }
 
     fn resize(
@@ -726,6 +881,7 @@ impl cellular_automata_3d::framework::App for App {
         self.projection.resize(config.width, config.height);
         self.depth_texture =
             texture::Texture::create_depth_texture(device, config, "depth_texture");
+        self.text_renderer.update_viewport_size(config, queue);
         queue.write_buffer(&self.buffers.uniform, 0, bytemuck::cast_slice(mx_ref));
     }
 
@@ -769,6 +925,9 @@ impl cellular_automata_3d::framework::App for App {
             );
             render_pass.pop_debug_group();
             render_pass.insert_debug_marker("Draw!");
+
+            // render text
+            self.text_renderer.render(device, queue, &mut render_pass);
         }
 
         if self.settings.world_grid_active {
@@ -875,39 +1034,22 @@ impl cellular_automata_3d::framework::App for App {
             }
         }
     }
+
+    fn trim_atlas(&mut self) {
+        self.text_renderer.trim_atlas();
+    }
 }
 
 pub fn main() {
     let args: CommandLineArgs = CommandLineArgs::parse();
     if args.subcommand.is_some() {
         // no need to check what it is as only one subcommand exists
-        let color_iterator = Color::iter();
-        println!(
-            "{:^12} - {:^18} - {:^15} - {:^7}",
-            "Color", "Float  (0.0 - 1.1)", "Int (0 - 255)", "Hex"
-        );
-        for color in color_iterator {
-            let color_value = color.value();
-            let color_0_255 = color.to_rgb_0_255();
-            let color_hex = color.to_hex();
-            println!(
-                "{}",
-                format!(
-                    "{:12} - ({:4}, {:4}, {:4}) - ({:3}, {:3}, {:3}) - {}",
-                    color,
-                    color_value[0],
-                    color_value[1],
-                    color_value[2],
-                    color_0_255[0],
-                    color_0_255[1],
-                    color_0_255[2],
-                    color_hex
-                )
-                .on_truecolor(color_0_255[0], color_0_255[1], color_0_255[2])
-            );
-        }
+        Color::print_color_help();
         return;
     }
     init_logger(args.debug);
-    cellular_automata_3d::framework::run::<App>("3D Cellular Automata", args);
+    pollster::block_on(cellular_automata_3d::framework::start::<App>(
+        "3D Cellular Automata",
+        args,
+    ));
 }

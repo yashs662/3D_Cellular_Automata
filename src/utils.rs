@@ -1,7 +1,8 @@
 use cgmath::Vector4;
 use clap::Parser;
+use colored::Colorize;
 use palette::{Mix, Srgb};
-use strum::{Display, EnumIter, EnumString};
+use strum::{Display, EnumIter, EnumString, IntoEnumIterator};
 
 /// Initialize logging in platform dependant ways.
 pub fn init_logger(debug_mode: bool) {
@@ -335,5 +336,38 @@ impl Color {
             mixed.blue,
             color_1.w * dt + color_2.w * (1.0 - dt),
         )
+    }
+
+    pub fn print_color_help() {
+        let color_iterator = Color::iter();
+        println!(
+            "{:^12} - {:^18} - {:^15} - {:^7}",
+            "Color", "Float  (0.0 - 1.1)", "Int (0 - 255)", "Hex"
+        );
+        for color in color_iterator {
+            let color_value = color.value();
+            let color_0_255 = color.to_rgb_0_255();
+            let color_hex = color.to_hex();
+            println!(
+                "{}",
+                format!(
+                    "{:12} - ({:4}, {:4}, {:4}) - ({:3}, {:3}, {:3}) - {}",
+                    color,
+                    color_value[0],
+                    color_value[1],
+                    color_value[2],
+                    color_0_255[0],
+                    color_0_255[1],
+                    color_0_255[2],
+                    color_hex
+                )
+                .on_truecolor(color_0_255[0], color_0_255[1], color_0_255[2])
+            );
+        }
+    }
+
+    pub fn to_glyphon_color(&self) -> glyphon::Color {
+        let [r, g, b] = self.to_rgb_0_255();
+        glyphon::Color::rgb(r, g, b)
     }
 }
