@@ -1,14 +1,16 @@
 use crate::{
     camera::Camera,
     framework::Settings,
-    simulation::{CellState, CellStateEnum, ColorMethod},
+    simulation::{CellState, CellStateEnum, ColorMethod, SimulationState},
     utils::{Color, UpdateEnum, UpdateQueue},
     vertex::Vertex,
 };
 use bytemuck::{Pod, Zeroable};
+use cgmath::EuclideanSpace;
 use cgmath::{InnerSpace, Rotation3};
 use rand::{rngs::ThreadRng, Rng};
 use std::mem;
+use std::time::Duration;
 use wgpu::util::DeviceExt;
 
 #[cfg(feature = "multithreading")]
@@ -275,9 +277,7 @@ impl InstanceManager {
     }
 
     #[cfg(feature = "multithreading")]
-    pub fn sort_by_distance_to_camera(&mut self, camera: &Camera) {
-        use cgmath::EuclideanSpace;
-
+    pub fn sort_by_distance_to_camera(&mut self, camera: &Camera) -> Duration {
         let start = std::time::Instant::now();
         let camera_position = camera.position.to_vec();
         self.flattened.par_sort_by(|a, b| {
@@ -288,11 +288,11 @@ impl InstanceManager {
         // SimulationMode::Gpu => {
         //     // Maybe use the gpu to sort the instances
         // }
-        log::debug!("Time to sort: {:?}", start.elapsed());
+        return start.elapsed();
     }
 
     #[cfg(not(feature = "multithreading"))]
-    pub fn sort_by_distance_to_camera(&mut self, camera: &Camera) {
+    pub fn sort_by_distance_to_camera(&mut self, camera: &Camera) -> Duration {
         let start = std::time::Instant::now();
         let camera_position = camera.position.to_vec();
         self.flattened.sort_by(|a, b| {
@@ -300,7 +300,7 @@ impl InstanceManager {
             let b_dist = (b.position - camera_position).magnitude();
             b_dist.partial_cmp(&a_dist).unwrap()
         });
-        log::debug!("Time to sort: {:?}", start.elapsed());
+        return start.elapsed();
     }
 
     pub fn flatten<F: FnOnce()>(&mut self, schedule_create_new_buffer: F) {
@@ -331,9 +331,8 @@ impl InstanceManager {
     pub fn handle_simulation_result(
         &mut self,
         did_something: bool,
-        settings: &mut Settings,
         update_queue: &mut UpdateQueue,
-    ) {
+    ) -> Option<SimulationState> {
         if did_something {
             self.flatten(|| {
                 update_queue.add(UpdateEnum::SortInstances);
@@ -343,14 +342,19 @@ impl InstanceManager {
                 update_queue.add(UpdateEnum::SortInstances);
                 update_queue.add(UpdateEnum::UpdateInstanceBuffer);
             }
+            None
         } else {
             log::warn!("Simulation has reached a stable state, pausing simulation");
-            settings.simulation_paused = true;
+            Some(SimulationState::Stable)
         }
     }
 
     #[cfg(feature = "multithreading")]
-    pub fn simulate(&mut self, settings: &mut Settings, update_queue: &mut UpdateQueue) {
+    pub fn simulate(
+        &mut self,
+        settings: &Settings,
+        update_queue: &mut UpdateQueue,
+    ) -> Option<SimulationState> {
         let instance_cache = self.instances.clone();
         let did_something = self
             .instances
@@ -359,11 +363,15 @@ impl InstanceManager {
             .map(|(x, layer)| Self::per_thread_simulate(layer, settings, x, &instance_cache))
             .reduce(|| false, |a, b| a || b);
 
-        self.handle_simulation_result(did_something, settings, update_queue);
+        self.handle_simulation_result(did_something, update_queue)
     }
 
     #[cfg(not(feature = "multithreading"))]
-    pub fn simulate(&mut self, settings: &mut Settings, update_queue: &mut UpdateQueue) {
+    pub fn simulate(
+        &mut self,
+        settings: &mut Settings,
+        update_queue: &mut UpdateQueue,
+    ) -> Option<SimulationState> {
         let instance_cache = self.instances.clone();
         let did_anything = self
             .instances
@@ -372,7 +380,7 @@ impl InstanceManager {
             .map(|(x, layer)| Self::per_thread_simulate(layer, settings, x, &instance_cache))
             .fold(false, |a, b| a || b);
 
-        self.handle_simulation_result(did_anything, settings, update_queue);
+        self.handle_simulation_result(did_anything, update_queue)
     }
 
     pub fn update_buffer(&mut self, queue: &wgpu::Queue, instance_buffer: &wgpu::Buffer) {
@@ -451,11 +459,7 @@ impl InstanceManager {
         adjust_buffer_size_required
     }
 
-    pub fn increase_domain_size(
-        &mut self,
-        settings: &Settings,
-        camera: &Camera,
-    ) -> Option<UpdateEnum> {
+    pub fn increase_domain_size(&mut self, settings: &Settings) -> Option<UpdateEnum> {
         let mut new_instances: Vec<Vec<Vec<Instance>>> = Vec::new();
         let mut return_update_enum = None;
         for x in 0..settings.domain_size {
@@ -491,15 +495,10 @@ impl InstanceManager {
         }
         self.instances = new_instances;
         self.flatten(|| return_update_enum = Some(UpdateEnum::CreateNewInstanceBuffer));
-        self.sort_by_distance_to_camera(camera);
         return_update_enum
     }
 
-    pub fn decrease_domain_size(
-        &mut self,
-        settings: &Settings,
-        camera: &Camera,
-    ) -> Option<UpdateEnum> {
+    pub fn decrease_domain_size(&mut self, settings: &Settings) -> Option<UpdateEnum> {
         let mut new_instances: Vec<Vec<Vec<Instance>>> = Vec::new();
         let mut return_update_enum = None;
         // remove the outer layer of instances and keep the cube inside eg initially 12x12x12 then 10x10x10 remove 1 layer from each side
@@ -516,7 +515,6 @@ impl InstanceManager {
         }
         self.instances = new_instances;
         self.flatten(|| return_update_enum = Some(UpdateEnum::CreateNewInstanceBuffer));
-        self.sort_by_distance_to_camera(camera);
         return_update_enum
     }
 

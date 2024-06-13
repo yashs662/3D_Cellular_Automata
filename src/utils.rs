@@ -2,6 +2,7 @@ use cgmath::Vector4;
 use clap::Parser;
 use colored::Colorize;
 use palette::{Mix, Srgb};
+use std::io::Write;
 use strum::{Display, EnumIter, EnumString, IntoEnumIterator};
 
 /// Initialize logging in platform dependant ways.
@@ -12,13 +13,41 @@ pub fn init_logger(debug_mode: bool) {
         log::LevelFilter::Info
     };
 
-    env_logger::builder()
+    let mut builder = env_logger::Builder::new();
+
+    // Use a custom format function to conditionally include or exclude file paths
+    builder.format(move |buf, record| {
+        let level = match record.level() {
+            log::Level::Error => "ERROR".red(),
+            log::Level::Warn => "WARN".yellow(),
+            log::Level::Info => "INFO".blue(),
+            log::Level::Debug => "DEBUG".green(),
+            log::Level::Trace => "TRACE".magenta(),
+        };
+        let opening_bracket = "[".dimmed();
+        let closing_bracket = "]".dimmed();
+        if debug_mode {
+            // In debug mode, include everything and colorize
+            writeln!(
+                buf,
+                "{}{} {}{} - {} - {}",
+                opening_bracket,
+                chrono::Local::now().format("%H:%M:%S%.3f").to_string(),
+                level,
+                closing_bracket,
+                record.target(),
+                record.args()
+            )
+        } else {
+            writeln!(buf, "{} - {}", level, record.args())
+        }
+    });
+
+    builder
         .filter_level(filter_level)
-        // We keep wgpu at Error level, as it's very noisy.
-        .filter_module("wgpu_core", log::LevelFilter::Info)
+        .filter_module("wgpu_core", log::LevelFilter::Error)
         .filter_module("wgpu_hal", log::LevelFilter::Error)
         .filter_module("naga", log::LevelFilter::Error)
-        .parse_default_env()
         .init();
 }
 

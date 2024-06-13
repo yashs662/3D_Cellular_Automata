@@ -23,7 +23,8 @@ clap = { version = "4.5.7", features = ["derive"] }
 palette = "0.7.6"
 strum = { version = "0.26.2", features = ["derive"] }
 colored = "2.1.0"
-glyphon = { git="https://github.com/grovesNL/glyphon.git"}
+glyphon = { git="https://github.com/grovesNL/glyphon.git" , rev = "2a45708"}
+chrono = "0.4.38"
 
 [features]
 default = ["multithreading"]

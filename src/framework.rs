@@ -106,7 +106,7 @@ impl SurfaceWrapper {
         let width = window_size.width.max(1);
         let height = window_size.height.max(1);
 
-        log::info!("Surface resume {window_size:?}");
+        log::debug!("Surface resume {window_size:?}");
 
         // We didn't create the surface in pre_adapter, so we need to do so now.
 
@@ -137,7 +137,7 @@ impl SurfaceWrapper {
 
     /// Resize the surface, making sure to not resize to zero.
     fn resize(&mut self, context: &AppContext, size: PhysicalSize<u32>) {
-        log::info!("Surface resize {size:?}");
+        log::debug!("Surface resize {size:?}");
 
         let config = self.config.as_mut().unwrap();
         config.width = size.width.max(1);
@@ -206,7 +206,7 @@ struct AppContext {
 impl AppContext {
     /// Initializes the app context.
     async fn init_async<E: App>(surface: &mut SurfaceWrapper, _window: Arc<Window>) -> Self {
-        log::info!("Initializing wgpu...");
+        log::debug!("Initializing wgpu...");
 
         let backends = wgpu::util::backend_bits_from_env().unwrap_or_default();
         let dx12_shader_compiler = wgpu::util::dx12_shader_compiler_from_env().unwrap_or_default();
@@ -223,7 +223,7 @@ impl AppContext {
             .expect("No suitable GPU adapters found on the system!");
 
         let adapter_info = adapter.get_info();
-        log::info!("Using {} ({:?})", adapter_info.name, adapter_info.backend);
+        log::debug!("Using {} ({:?})", adapter_info.name, adapter_info.backend);
 
         let optional_features = E::optional_features();
         let required_features = E::required_features();
@@ -322,6 +322,7 @@ impl FrameCounter {
 }
 
 pub async fn start<E: App>(title: &str, command_line_args: CommandLineArgs) {
+    log::info!("Initializing...");
     let window_loop = EventLoopWrapper::new(title);
     let mut surface = SurfaceWrapper::new();
     let context = AppContext::init_async::<E>(&mut surface, window_loop.window.clone()).await;
@@ -330,7 +331,7 @@ pub async fn start<E: App>(title: &str, command_line_args: CommandLineArgs) {
     // We wait to create the app until we have a valid surface.
     let mut app = None;
 
-    log::info!("Entering event loop...");
+    log::debug!("Entering event loop...");
     let loop_result = EventLoop::run(
         window_loop.event_loop,
         move |event: Event<()>, target: &EventLoopWindowTarget<()>| {
@@ -348,6 +349,7 @@ pub async fn start<E: App>(title: &str, command_line_args: CommandLineArgs) {
                             &command_line_args,
                             window_loop.window.scale_factor(),
                         ));
+                        log::info!("Initialization complete");
                     }
                 }
                 Event::Suspended => {
@@ -426,7 +428,8 @@ pub async fn start<E: App>(title: &str, command_line_args: CommandLineArgs) {
             }
         },
     );
-    log::info!("Event loop ended with result {:?}", loop_result);
+    log::debug!("Event loop ended with result {:?}", loop_result);
+    log::info!("Exiting...");
 }
 
 #[derive(Debug, PartialEq)]
@@ -460,8 +463,8 @@ pub struct Settings {
     pub noise_amount: u8,
     pub simulation_rules: SimulationRules,
     pub color_method: ColorMethod,
-    pub simulation_paused: bool,
     pub simulation_mode: SimulationMode,
+    pub debug_mode: bool,
 }
 
 impl Default for Settings {
@@ -472,8 +475,12 @@ impl Default for Settings {
 
 impl Settings {
     pub fn new(command_line_args: CommandLineArgs) -> Self {
+        let default_transparency = 0.1;
         let simulation_rules = SimulationRules::parse_rules(command_line_args.rules.as_deref());
-        let color_method = ColorMethod::parse_method(command_line_args.color_method.as_deref());
+        let color_method = ColorMethod::parse_method(
+            command_line_args.color_method.as_deref(),
+            default_transparency,
+        );
         let simulation_tick_rate = Validator::validate_simulation_tick_rate(
             command_line_args.simulation_tick_rate.unwrap_or(10),
         );
@@ -495,7 +502,6 @@ impl Settings {
         let help_gui_active = false;
         let cube_size = 1.0;
         let space_between_instances = 0.1;
-        let transparency = 0.1;
         let num_instances_step_size = 2;
         let transparency_step_size = 0.1;
         let space_between_step_size = 0.05;
@@ -503,7 +509,6 @@ impl Settings {
         let translation_threshold_for_sort = 10.0;
         let max_domain_size = 100;
         let last_simulation_tick = std::time::Instant::now();
-        let simulation_paused = true; // Start simulation paused
 
         #[cfg(feature = "multithreading")]
         let simulation_mode = SimulationMode::MultiThreaded;
@@ -525,7 +530,7 @@ impl Settings {
             domain_magnitude,
             cube_size,
             space_between_instances,
-            transparency,
+            transparency: default_transparency,
             num_instances_step_size,
             transparency_step_size,
             space_between_step_size,
@@ -537,8 +542,8 @@ impl Settings {
             noise_amount,
             simulation_rules,
             color_method,
-            simulation_paused,
             simulation_mode,
+            debug_mode: command_line_args.debug,
         }
     }
 
@@ -565,15 +570,6 @@ impl Settings {
     pub fn toggle_world_grid(&mut self) {
         self.world_grid_active = !self.world_grid_active;
         log::info!("World grid display set to: {}", self.world_grid_active);
-    }
-
-    pub fn toggle_pause_simulation(&mut self) {
-        self.simulation_paused = !self.simulation_paused;
-        if self.simulation_paused {
-            log::info!("Simulation paused");
-        } else {
-            log::info!("Simulation resumed");
-        }
     }
 
     pub fn set_domain_size(&mut self, domain_size: u32, update_queue: &mut UpdateQueue) {

@@ -3,13 +3,14 @@ use cellular_automata_3d::{
     constants::DEPTH_FORMAT,
     framework::Settings,
     instance::{Instance, InstanceManager, InstanceRaw},
+    simulation::SimulationState,
     texture::{self, Texture},
     utils::{init_logger, Color, CommandLineArgs, UpdateEnum, UpdateQueue},
     vertex::Vertex,
 };
 use cgmath::InnerSpace;
 use clap::Parser;
-use std::{borrow::Cow, f32::consts, mem};
+use std::{borrow::Cow, f32::consts, mem, time::Duration};
 use wgpu::{util::DeviceExt, PipelineCompilationOptions};
 use winit::{
     event::{DeviceEvent, ElementState, KeyEvent, MouseButton, WindowEvent},
@@ -43,7 +44,7 @@ enum TextRenderLevel {
 }
 
 impl TextRenderLevel {
-    pub fn color(&self) -> glyphon::Color {
+    pub fn glyphon_color(&self) -> glyphon::Color {
         match self {
             TextRenderLevel::Debug => Color::Green.to_glyphon_color(),
             TextRenderLevel::Info => Color::White.to_glyphon_color(),
@@ -59,8 +60,13 @@ struct TextRenderer {
     viewport: glyphon::Viewport,
     text_renderer: glyphon::TextRenderer,
     atlas: glyphon::TextAtlas,
-    fps_buffer: glyphon::Buffer,
     fps_level: TextRenderLevel,
+    simulation_stable_level: TextRenderLevel,
+    fps_buffer: glyphon::Buffer,
+    cpu_time_buffer: glyphon::Buffer,
+    simulation_time_buffer: glyphon::Buffer,
+    sort_time_buffer: glyphon::Buffer,
+    simulation_stable_text_buffer: glyphon::Buffer,
 }
 
 impl TextRenderer {
@@ -87,7 +93,14 @@ impl TextRenderer {
                 bias: wgpu::DepthBiasState::default(),
             }),
         );
-        let mut buffer = glyphon::Buffer::new(&mut font_system, glyphon::Metrics::new(20.0, 20.0));
+
+        let font_metrics = glyphon::Metrics::new(20.0, 20.0);
+        let mut fps_buffer = glyphon::Buffer::new(&mut font_system, font_metrics);
+        let mut cpu_time_buffer = glyphon::Buffer::new(&mut font_system, font_metrics);
+        let mut simulation_time_buffer = glyphon::Buffer::new(&mut font_system, font_metrics);
+        let mut sort_time_buffer = glyphon::Buffer::new(&mut font_system, font_metrics);
+        let mut simulation_stable_text_buffer =
+            glyphon::Buffer::new(&mut font_system, font_metrics);
 
         let physical_width = (config.width as f64 * scale_factor) as f32;
         let physical_height = (config.height as f64 * scale_factor) as f32;
@@ -99,14 +112,48 @@ impl TextRenderer {
                 height: config.height,
             },
         );
-        buffer.set_size(&mut font_system, physical_width, physical_height);
-        buffer.set_text(
+
+        fps_buffer.set_size(&mut font_system, physical_width, physical_height);
+        cpu_time_buffer.set_size(&mut font_system, physical_width, physical_height);
+        simulation_time_buffer.set_size(&mut font_system, physical_width, physical_height);
+        sort_time_buffer.set_size(&mut font_system, physical_width, physical_height);
+        simulation_stable_text_buffer.set_size(&mut font_system, physical_width, physical_height);
+
+        fps_buffer.set_text(
             &mut font_system,
             "Frame time 0.00ms (0.0 FPS)",
             glyphon::Attrs::new().family(glyphon::Family::SansSerif),
             glyphon::Shaping::Advanced,
         );
-        buffer.shape_until_scroll(&mut font_system, false);
+        fps_buffer.shape_until_scroll(&mut font_system, false);
+        cpu_time_buffer.set_text(
+            &mut font_system,
+            "CPU time 0.00ms",
+            glyphon::Attrs::new().family(glyphon::Family::SansSerif),
+            glyphon::Shaping::Advanced,
+        );
+        cpu_time_buffer.shape_until_scroll(&mut font_system, false);
+        simulation_time_buffer.set_text(
+            &mut font_system,
+            "Simulation time 0.00ms",
+            glyphon::Attrs::new().family(glyphon::Family::SansSerif),
+            glyphon::Shaping::Advanced,
+        );
+        simulation_time_buffer.shape_until_scroll(&mut font_system, false);
+        sort_time_buffer.set_text(
+            &mut font_system,
+            "Sort time 0.00ms",
+            glyphon::Attrs::new().family(glyphon::Family::SansSerif),
+            glyphon::Shaping::Advanced,
+        );
+        sort_time_buffer.shape_until_scroll(&mut font_system, false);
+        simulation_stable_text_buffer.set_text(
+            &mut font_system,
+            "Simulation Active",
+            glyphon::Attrs::new().family(glyphon::Family::SansSerif),
+            glyphon::Shaping::Advanced,
+        );
+        simulation_stable_text_buffer.shape_until_scroll(&mut font_system, false);
 
         Self {
             font_system,
@@ -114,8 +161,13 @@ impl TextRenderer {
             viewport,
             text_renderer,
             atlas,
-            fps_buffer: buffer,
             fps_level: TextRenderLevel::Warning,
+            simulation_stable_level: TextRenderLevel::Info,
+            fps_buffer,
+            cpu_time_buffer,
+            simulation_time_buffer,
+            sort_time_buffer,
+            simulation_stable_text_buffer,
         }
     }
 
@@ -138,6 +190,7 @@ impl TextRenderer {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         render_pass: &mut wgpu::RenderPass<'a>,
+        debug_mode: bool,
     ) {
         let fps_text_area = glyphon::TextArea {
             buffer: &self.fps_buffer,
@@ -145,7 +198,51 @@ impl TextRenderer {
             top: 10.0,
             scale: 1.0,
             bounds: glyphon::TextBounds::default(),
-            default_color: self.fps_level.color(),
+            default_color: self.fps_level.glyphon_color(),
+        };
+        let simulation_stable_text_area = glyphon::TextArea {
+            buffer: &self.simulation_stable_text_buffer,
+            left: 10.0,
+            top: 30.0,
+            scale: 1.0,
+            bounds: glyphon::TextBounds::default(),
+            default_color: self.simulation_stable_level.glyphon_color(),
+        };
+        let cpu_time_text_area = glyphon::TextArea {
+            buffer: &self.cpu_time_buffer,
+            left: 10.0,
+            top: 50.0,
+            scale: 1.0,
+            bounds: glyphon::TextBounds::default(),
+            default_color: TextRenderLevel::Debug.glyphon_color(),
+        };
+        let simulation_time_text_area = glyphon::TextArea {
+            buffer: &self.simulation_time_buffer,
+            left: 10.0,
+            top: 70.0,
+            scale: 1.0,
+            bounds: glyphon::TextBounds::default(),
+            default_color: TextRenderLevel::Debug.glyphon_color(),
+        };
+        let sort_time_text_area = glyphon::TextArea {
+            buffer: &self.sort_time_buffer,
+            left: 10.0,
+            top: 90.0,
+            scale: 1.0,
+            bounds: glyphon::TextBounds::default(),
+            default_color: TextRenderLevel::Debug.glyphon_color(),
+        };
+
+        let text_areas = if debug_mode {
+            vec![
+                fps_text_area,
+                simulation_stable_text_area,
+                cpu_time_text_area,
+                simulation_time_text_area,
+                sort_time_text_area,
+            ]
+        } else {
+            vec![fps_text_area, simulation_stable_text_area]
         };
 
         self.text_renderer
@@ -155,7 +252,7 @@ impl TextRenderer {
                 &mut self.font_system,
                 &mut self.atlas,
                 &self.viewport,
-                [fps_text_area],
+                text_areas,
                 &mut self.swash_cache,
             )
             .unwrap();
@@ -169,7 +266,15 @@ impl TextRenderer {
         self.atlas.trim();
     }
 
-    pub fn update(&mut self, frame_time: f32, fps: f32) {
+    pub fn update(
+        &mut self,
+        frame_time: f32,
+        fps: f32,
+        cpu_time: Duration,
+        last_simulation_time: Option<Duration>,
+        last_sort_time: Duration,
+        simulation_state: SimulationState,
+    ) {
         if fps < 30.0 {
             self.fps_level = TextRenderLevel::Error;
         } else if fps < 60.0 {
@@ -177,13 +282,90 @@ impl TextRenderer {
         } else {
             self.fps_level = TextRenderLevel::Info;
         }
+
+        match simulation_state {
+            SimulationState::Active => self.simulation_stable_level = TextRenderLevel::Info,
+            SimulationState::Paused => self.simulation_stable_level = TextRenderLevel::Warning,
+            SimulationState::Stable => self.simulation_stable_level = TextRenderLevel::Debug,
+        }
+
+        let fps_text = if frame_time < 1.0 {
+            format!("Frame time {:05.3}µs ({:.1} FPS)", frame_time * 1000.0, fps)
+        } else {
+            format!("Frame time {:05.3}ms ({:.1} FPS)", frame_time, fps)
+        };
+        let cpu_time_text = if cpu_time.as_millis() < 1 {
+            format!("CPU time {:05.3}µs", cpu_time.as_micros() as f64 / 1000.0)
+        } else {
+            format!("CPU time {:05.3}ms", cpu_time.as_millis() as f64)
+        };
+        let sort_time_text = if last_sort_time.as_millis() < 1 {
+            format!(
+                "Last Sort time {:05.3}µs",
+                last_sort_time.as_micros() as f64 / 1000.0
+            )
+        } else {
+            format!(
+                "Last Sort time {:05.3}ms",
+                last_sort_time.as_millis() as f64
+            )
+        };
+        let simulation_state_text = match simulation_state {
+            SimulationState::Active => "Simulation Active",
+            SimulationState::Paused => "Simulation Paused",
+            SimulationState::Stable => "Simulation Stable, nothing to simulate",
+        };
+
         self.fps_buffer.set_text(
             &mut self.font_system,
-            &format!("Frame time {:.2}ms ({:.1} FPS)", frame_time, fps),
+            &fps_text,
             glyphon::Attrs::new().family(glyphon::Family::SansSerif),
             glyphon::Shaping::Advanced,
         );
-        self.fps_buffer.shape_until_scroll(&mut self.font_system, false);
+        self.cpu_time_buffer.set_text(
+            &mut self.font_system,
+            &cpu_time_text,
+            glyphon::Attrs::new().family(glyphon::Family::SansSerif),
+            glyphon::Shaping::Advanced,
+        );
+        self.sort_time_buffer.set_text(
+            &mut self.font_system,
+            &sort_time_text,
+            glyphon::Attrs::new().family(glyphon::Family::SansSerif),
+            glyphon::Shaping::Advanced,
+        );
+        self.simulation_stable_text_buffer.set_text(
+            &mut self.font_system,
+            simulation_state_text,
+            glyphon::Attrs::new().family(glyphon::Family::SansSerif),
+            glyphon::Shaping::Advanced,
+        );
+
+        // TODO: Check if this is necessary
+        self.fps_buffer
+            .shape_until_scroll(&mut self.font_system, false);
+        self.cpu_time_buffer
+            .shape_until_scroll(&mut self.font_system, false);
+        self.sort_time_buffer
+            .shape_until_scroll(&mut self.font_system, false);
+        self.simulation_stable_text_buffer
+            .shape_until_scroll(&mut self.font_system, false);
+
+        if let Some(simulation_time) = last_simulation_time {
+            let simulation_time_text = if simulation_time.as_millis() < 1 {
+                format!("Last Simulation time {:.2}µs", simulation_time.as_micros())
+            } else {
+                format!("Last Simulation time {:.2}ms", simulation_time.as_millis())
+            };
+            self.simulation_time_buffer.set_text(
+                &mut self.font_system,
+                &simulation_time_text,
+                glyphon::Attrs::new().family(glyphon::Family::SansSerif),
+                glyphon::Shaping::Advanced,
+            );
+            self.simulation_time_buffer
+                .shape_until_scroll(&mut self.font_system, false);
+        }
     }
 }
 
@@ -251,6 +433,8 @@ struct App {
     buffers: AppBuffers,
     pipelines: AppRenderPipelines,
     text_renderer: TextRenderer,
+    last_sort_time: Duration,
+    simulation_state: SimulationState,
 }
 
 impl App {
@@ -287,16 +471,22 @@ impl App {
         }
     }
 
-    fn simulation_update(&mut self) {
+    fn simulation_update(&mut self) -> Option<Duration> {
         if (self.settings.last_simulation_tick.elapsed().as_millis()
             >= self.settings.simulation_tick_rate.into())
-            && !self.settings.simulation_paused
+            && self.simulation_state == SimulationState::Active
         {
             let start = std::time::Instant::now();
-            self.instance_manager
-                .simulate(&mut self.settings, &mut self.update_queue);
+            if let Some(simulation_state) = self
+                .instance_manager
+                .simulate(&mut self.settings, &mut self.update_queue)
+            {
+                self.simulation_state = simulation_state;
+            }
             self.settings.last_simulation_tick = std::time::Instant::now();
-            log::debug!("Time to simulate: {:?}", start.elapsed());
+            Some(start.elapsed())
+        } else {
+            None
         }
     }
 
@@ -327,27 +517,28 @@ impl App {
                     scheduled_updates.push(UpdateEnum::UpdateInstanceBuffer);
                 }
                 UpdateEnum::SortInstances => {
-                    self.instance_manager
+                    self.last_sort_time = self
+                        .instance_manager
                         .sort_by_distance_to_camera(&self.camera);
                     self.last_sort_camera = self.camera;
                 }
                 UpdateEnum::NumInstancesIncreased => {
-                    if let Some(update_enum) = self
-                        .instance_manager
-                        .increase_domain_size(&self.settings, &self.camera)
+                    if let Some(update_enum) =
+                        self.instance_manager.increase_domain_size(&self.settings)
                     {
                         scheduled_updates.push(update_enum);
                     };
+                    scheduled_updates.push(UpdateEnum::SortInstances);
                     scheduled_updates.push(UpdateEnum::UpdateWorldGrid);
                     scheduled_updates.push(UpdateEnum::UpdateBoundingBox);
                 }
                 UpdateEnum::NumInstancesDecreased => {
-                    if let Some(update_enum) = self
-                        .instance_manager
-                        .decrease_domain_size(&self.settings, &self.camera)
+                    if let Some(update_enum) =
+                        self.instance_manager.decrease_domain_size(&self.settings)
                     {
                         scheduled_updates.push(update_enum);
                     };
+                    scheduled_updates.push(UpdateEnum::SortInstances);
                     scheduled_updates.push(UpdateEnum::UpdateWorldGrid);
                     scheduled_updates.push(UpdateEnum::UpdateBoundingBox);
                 }
@@ -452,7 +643,7 @@ impl cellular_automata_3d::framework::App for App {
             camera_bind_group,
         ) = setup_camera(config, device);
 
-        instance_manager.sort_by_distance_to_camera(&camera);
+        let sort_time = instance_manager.sort_by_distance_to_camera(&camera);
         let instance_buffer = instance_manager.create_new_buffer(device);
 
         let bounding_box_instance = Instance::create_bounding_box(&settings);
@@ -754,6 +945,8 @@ impl cellular_automata_3d::framework::App for App {
             world_grid_overlay: world_grid_pipeline_depth,
         };
 
+        let text_renderer = TextRenderer::new(device, config, queue, scale_factor);
+
         // Done
         App {
             bind_group,
@@ -773,7 +966,9 @@ impl cellular_automata_3d::framework::App for App {
             world_grid_vertices,
             buffers,
             pipelines,
-            text_renderer: TextRenderer::new(device, config, queue, scale_factor),
+            text_renderer,
+            last_sort_time: sort_time,
+            simulation_state: SimulationState::Paused,
         }
     }
 
@@ -815,7 +1010,21 @@ impl cellular_automata_3d::framework::App for App {
                                 &mut self.update_queue,
                             );
                         } else if s.as_str() == "o" {
-                            self.settings.toggle_pause_simulation();
+                            match self.simulation_state {
+                                SimulationState::Active => {
+                                    self.simulation_state = SimulationState::Paused;
+                                    log::info!("Simulation paused");
+                                }
+                                SimulationState::Paused => {
+                                    self.simulation_state = SimulationState::Active;
+                                    log::info!("Simulation active");
+                                }
+                                SimulationState::Stable => {
+                                    log::warn!(
+                                        "Simulation has reached a stable state. Cannot be resumed. Nothing to simulate."
+                                    )
+                                }
+                            }
                         } else if s.as_str() == "i" {
                             self.settings.toggle_world_grid();
                         } else if s.as_str() == "u" {
@@ -861,13 +1070,22 @@ impl cellular_automata_3d::framework::App for App {
     }
 
     fn update(&mut self, dt: f32, avg_fps: f32, queue: &wgpu::Queue, device: &wgpu::Device) {
+        let start = std::time::Instant::now();
         self.update_camera(dt, queue);
         self.transparency_update();
         self.queue_update(queue, device);
-        self.simulation_update();
+        let simulation_time = self.simulation_update();
         // For any Scheduled updates
         self.queue_update(queue, device);
-        self.text_renderer.update(dt, avg_fps);
+        let cpu_time = start.elapsed();
+        self.text_renderer.update(
+            dt,
+            avg_fps,
+            cpu_time,
+            simulation_time,
+            self.last_sort_time,
+            self.simulation_state.clone(),
+        );
     }
 
     fn resize(
@@ -927,7 +1145,8 @@ impl cellular_automata_3d::framework::App for App {
             render_pass.insert_debug_marker("Draw!");
 
             // render text
-            self.text_renderer.render(device, queue, &mut render_pass);
+            self.text_renderer
+                .render(device, queue, &mut render_pass, self.settings.debug_mode);
         }
 
         if self.settings.world_grid_active {

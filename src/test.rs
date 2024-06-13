@@ -67,7 +67,7 @@ mod color_method_parse_tests {
 
     #[test]
     fn parse_color() {
-        let color_method = ColorMethod::parse_method(Some("S/H/#FF00FF"));
+        let color_method = ColorMethod::parse_method(Some("S/H/#FF00FF"), 1.0);
         assert_eq!(
             color_method,
             ColorMethod::Single(Vector4::new(1.0, 0.0, 1.0, 1.0))
@@ -76,7 +76,7 @@ mod color_method_parse_tests {
 
     #[test]
     fn state_lerp() {
-        let color_method = ColorMethod::parse_method(Some("SL/H/#FFFF00/#00FFFF"));
+        let color_method = ColorMethod::parse_method(Some("SL/H/#FFFF00/#00FFFF"), 1.0);
         assert_eq!(
             color_method,
             ColorMethod::StateLerp(
@@ -88,7 +88,7 @@ mod color_method_parse_tests {
 
     #[test]
     fn dist_to_center() {
-        let color_method = ColorMethod::parse_method(Some("DTC/H/#FFFF00/#00FFFF"));
+        let color_method = ColorMethod::parse_method(Some("DTC/H/#FFFF00/#00FFFF"), 1.0);
         assert_eq!(
             color_method,
             ColorMethod::DistToCenter(
@@ -100,7 +100,7 @@ mod color_method_parse_tests {
 
     #[test]
     fn neighbor() {
-        let color_method = ColorMethod::parse_method(Some("N/H/#FFFF00/#00FFFF"));
+        let color_method = ColorMethod::parse_method(Some("N/H/#FFFF00/#00FFFF"), 1.0);
         assert_eq!(
             color_method,
             ColorMethod::Neighbor(
@@ -112,7 +112,7 @@ mod color_method_parse_tests {
 
     #[test]
     fn invalid_format() {
-        let color_method = ColorMethod::parse_method(Some("S/H/#FF0000/#00FF00"));
+        let color_method = ColorMethod::parse_method(Some("S/H/#FF0000/#00FF00"), 1.0);
         assert_eq!(
             color_method,
             ColorMethod::Single(Vector4::new(
@@ -126,7 +126,7 @@ mod color_method_parse_tests {
 
     #[test]
     fn no_method() {
-        let color_method = ColorMethod::parse_method(None);
+        let color_method = ColorMethod::parse_method(None, 1.0);
         assert_eq!(
             color_method,
             ColorMethod::Single(Vector4::new(
@@ -140,7 +140,7 @@ mod color_method_parse_tests {
 
     #[test]
     fn invalid_color_type() {
-        let color_method = ColorMethod::parse_method(Some("S/X/#FFFFFF"));
+        let color_method = ColorMethod::parse_method(Some("S/X/#FFFFFF"), 1.0);
         assert_eq!(
             color_method,
             ColorMethod::Single(Vector4::new(
@@ -154,7 +154,7 @@ mod color_method_parse_tests {
 
     #[test]
     fn invalid_color_format() {
-        let color_method = ColorMethod::parse_method(Some("S/H/#FF00"));
+        let color_method = ColorMethod::parse_method(Some("S/H/#FF00"), 1.0);
         assert_eq!(
             color_method,
             ColorMethod::Single(Vector4::new(
@@ -168,7 +168,7 @@ mod color_method_parse_tests {
 
     #[test]
     fn invalid_color_format_0_1() {
-        let color_method = ColorMethod::parse_method(Some("S/1/2.0,5.0,0.0"));
+        let color_method = ColorMethod::parse_method(Some("S/1/2.0,5.0,0.0"), 1.0);
         assert_eq!(
             color_method,
             ColorMethod::Single(Vector4::new(
@@ -182,7 +182,7 @@ mod color_method_parse_tests {
 
     #[test]
     fn invalid_color_format_0_255() {
-        let color_method = ColorMethod::parse_method(Some("S/255/256,310,0"));
+        let color_method = ColorMethod::parse_method(Some("S/255/256,310,0"), 1.0);
         assert_eq!(
             color_method,
             ColorMethod::Single(Vector4::new(
@@ -196,7 +196,7 @@ mod color_method_parse_tests {
 
     #[test]
     fn wrong_number_of_colors() {
-        let color_method = ColorMethod::parse_method(Some("SL/H/#000000"));
+        let color_method = ColorMethod::parse_method(Some("SL/H/#000000"), 1.0);
         assert_eq!(
             color_method,
             ColorMethod::Single(Vector4::new(
@@ -210,7 +210,7 @@ mod color_method_parse_tests {
 
     #[test]
     fn weird_spacing() {
-        let color_method = ColorMethod::parse_method(Some(" SL / H/  #00FFFF  / #0000FF"));
+        let color_method = ColorMethod::parse_method(Some(" SL / H/  #00FFFF  / #0000FF"), 1.0);
         assert_eq!(
             color_method,
             ColorMethod::StateLerp(
@@ -222,7 +222,7 @@ mod color_method_parse_tests {
 
     #[test]
     fn wrong_separator() {
-        let color_method = ColorMethod::parse_method(Some("SL/H/#00FFFF-#0000FF"));
+        let color_method = ColorMethod::parse_method(Some("SL/H/#00FFFF-#0000FF"), 1.0);
         assert_eq!(
             color_method,
             ColorMethod::Single(Vector4::new(
@@ -236,7 +236,7 @@ mod color_method_parse_tests {
 
     #[test]
     fn wrong_separator2() {
-        let color_method = ColorMethod::parse_method(Some("SL/H/#00FFFF,#0000FF"));
+        let color_method = ColorMethod::parse_method(Some("SL/H/#00FFFF,#0000FF"), 1.0);
         assert_eq!(
             color_method,
             ColorMethod::Single(Vector4::new(
@@ -250,7 +250,7 @@ mod color_method_parse_tests {
 
     #[test]
     fn no_color() {
-        let color_method = ColorMethod::parse_method(Some("SL/H/"));
+        let color_method = ColorMethod::parse_method(Some("SL/H/"), 1.0);
         assert_eq!(
             color_method,
             ColorMethod::Single(Vector4::new(
