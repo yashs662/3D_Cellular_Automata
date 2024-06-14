@@ -5,6 +5,12 @@ use palette::{Mix, Srgb};
 use std::io::Write;
 use strum::{Display, EnumIter, EnumString, IntoEnumIterator};
 
+use crate::constants::{
+    MAX_DOMAIN_SIZE, MAX_NOISE_AMOUNT, MAX_SIMULATION_TICK_RATE, MAX_SPACE_BETWEEN_INSTANCES,
+    MAX_TRANSPARENCY, MIN_DOMAIN_SIZE, MIN_SIMULATION_TICK_RATE, MIN_SPACE_BETWEEN_INSTANCES,
+    MIN_SPAWN_SIZE, MIN_TRANSPARENCY,
+};
+
 /// Initialize logging in platform dependant ways.
 pub fn init_logger(debug_mode: bool) {
     let filter_level = if debug_mode {
@@ -32,7 +38,7 @@ pub fn init_logger(debug_mode: bool) {
                 buf,
                 "{}{} {}{} - {} - {}",
                 opening_bracket,
-                chrono::Local::now().format("%H:%M:%S%.3f").to_string(),
+                chrono::Local::now().format("%H:%M:%S%.3f"),
                 level,
                 closing_bracket,
                 record.target(),
@@ -94,7 +100,7 @@ pub struct CommandLineArgs {
     /// Color Method to use
     /// This will determine how the colors are calculated for the simulation.
     /// accepts hex values or color range from 0-1 or 0-255 in three channels red green adn blue (no Alpha).
-    /// Append with H for hex, 1 for 0-1, 255 for 0-255, and D for predefined colors. you can use predefined colors with
+    /// Append with H for hex, 1 for 0-1, 255 for 0-255, and PD for predefined colors. you can use predefined colors with
     /// any option to mix and match but can only use predefined colors when using the D option.
     /// The options are S (Single), SL (StateLerp), DTC (DistToCenter), N (Neighbor).
     ///
@@ -111,7 +117,7 @@ pub struct CommandLineArgs {
     /// N/H/#FF0000/#00FF00,
     /// N/1/1.0,0.0,0.0/0.0,1.0,0.0,
     /// N/255/255,0,0/0,255,0,
-    /// SL/D/Red/Green,
+    /// SL/PD/Red/Green,
     /// SL/H/#FF0000/Green
     #[arg(short, long, visible_alias = "cm")]
     pub color_method: Option<String>,
@@ -129,13 +135,19 @@ pub struct Validator;
 impl Validator {
     pub fn validate_simulation_tick_rate(simulation_tick_rate: u16) -> u16 {
         match simulation_tick_rate {
-            x if x < 1 => {
-                log::warn!("Simulation tick rate cannot be less than 1");
-                1
+            x if x < MIN_SIMULATION_TICK_RATE => {
+                log::warn!(
+                    "Simulation tick rate cannot be less than {}",
+                    MIN_SIMULATION_TICK_RATE
+                );
+                MIN_SIMULATION_TICK_RATE
             }
-            x if x > 1000 => {
-                log::warn!("Simulation tick rate cannot be more than 1000 for a smooth experience");
-                1000
+            x if x > MAX_SIMULATION_TICK_RATE => {
+                log::warn!(
+                    "Simulation tick rate cannot be more than {} for a smooth experience",
+                    MAX_SIMULATION_TICK_RATE
+                );
+                MAX_SIMULATION_TICK_RATE
             }
             _ => simulation_tick_rate,
         }
@@ -143,13 +155,13 @@ impl Validator {
 
     pub fn validate_domain_size(domain_size: u32) -> u32 {
         match domain_size {
-            x if x < 3 => {
-                log::warn!("Domain size cannot be less than 3");
-                3
+            x if x < MIN_DOMAIN_SIZE => {
+                log::warn!("Domain size cannot be less than {}", MIN_DOMAIN_SIZE);
+                MIN_DOMAIN_SIZE
             }
-            x if x > 100 => {
-                log::warn!("Domain size cannot be more than 100");
-                100
+            x if x > MAX_DOMAIN_SIZE => {
+                log::warn!("Domain size cannot be more than {}", MAX_DOMAIN_SIZE);
+                MAX_DOMAIN_SIZE
             }
             _ => domain_size,
         }
@@ -157,9 +169,9 @@ impl Validator {
 
     pub fn validate_spawn_size(spawn_size: u8, domain_size: u8) -> u8 {
         match spawn_size {
-            x if x < 2 => {
-                log::warn!("Spawn size cannot be less than 2");
-                2
+            x if x < MIN_SPAWN_SIZE => {
+                log::warn!("Spawn size cannot be less than {}", MIN_SPAWN_SIZE);
+                MIN_SPAWN_SIZE
             }
             x if x > domain_size => {
                 log::warn!("Spawn size cannot be more than the Domain size",);
@@ -174,35 +186,41 @@ impl Validator {
     }
 
     pub fn validate_noise_amount(noise_amount: u8) -> u8 {
-        if noise_amount > 10 {
-            log::warn!("Noise level cannot be more than 10");
-            10
+        if noise_amount > MAX_NOISE_AMOUNT {
+            log::warn!("Noise level cannot be more than {}", MAX_NOISE_AMOUNT);
+            MAX_NOISE_AMOUNT
+        } else if noise_amount == 0 {
+            1
         } else {
             noise_amount
         }
     }
 
     pub fn validate_space_between_instances(space_between_instances: f32) -> f32 {
-        if space_between_instances < 0.1 {
+        if space_between_instances < MIN_SPACE_BETWEEN_INSTANCES {
             log::warn!(
-                "Space between instances cannot be less than 0.1 to avoid overlapping instances"
+                "Space between instances cannot be less than {} to avoid overlapping instances",
+                MIN_SPACE_BETWEEN_INSTANCES
             );
-            0.1
-        } else if space_between_instances > 10.0 {
-            log::warn!("Space between instances cannot be more than 10.0");
-            10.0
+            MIN_SPACE_BETWEEN_INSTANCES
+        } else if space_between_instances > MAX_SPACE_BETWEEN_INSTANCES {
+            log::warn!(
+                "Space between instances cannot be more than {}",
+                MAX_SPACE_BETWEEN_INSTANCES
+            );
+            MAX_SPACE_BETWEEN_INSTANCES
         } else {
             (space_between_instances * 100.0).round() / 100.0
         }
     }
 
     pub fn validate_transparency(transparency: f32) -> f32 {
-        if transparency < 0.0 {
-            log::warn!("Transparency cannot be less than 0.0");
-            0.0
-        } else if transparency > 1.0 {
-            log::warn!("Transparency cannot be more than 1.0");
-            1.0
+        if transparency < MIN_TRANSPARENCY {
+            log::warn!("Transparency cannot be less than {}", MIN_TRANSPARENCY);
+            MIN_TRANSPARENCY
+        } else if transparency > MAX_TRANSPARENCY {
+            log::warn!("Transparency cannot be more than {}", MAX_TRANSPARENCY);
+            MAX_TRANSPARENCY
         } else {
             (transparency * 100.0).round() / 100.0
         }
@@ -240,7 +258,7 @@ impl UpdateQueue {
     }
 }
 
-#[derive(PartialEq)]
+#[derive(PartialEq, Debug)]
 pub enum UpdateEnum {
     CreateNewInstanceBuffer,
     NumInstancesDecreased,
@@ -253,7 +271,7 @@ pub enum UpdateEnum {
     UpdateWorldGrid,
 }
 
-#[derive(Debug, EnumString, EnumIter, Display)]
+#[derive(EnumString, EnumIter, Display)]
 #[strum(ascii_case_insensitive)]
 pub enum Color {
     AliceBlue,
@@ -338,6 +356,47 @@ impl Color {
         }
     }
 
+    pub fn from_value(value: [f32; 3]) -> Option<Self> {
+        let [r, g, b] = value;
+        let color_iterator = Color::iter();
+        for color in color_iterator {
+            let color_value = color.value();
+            if (r - color_value[0]).abs() < f32::EPSILON
+                && (g - color_value[1]).abs() < f32::EPSILON
+                && (b - color_value[2]).abs() < f32::EPSILON
+            {
+                return Some(color);
+            }
+        }
+        None
+    }
+
+    pub fn as_vec4(&self, transparency: f32) -> Vector4<f32> {
+        let [r, g, b] = self.value();
+        Vector4::new(r, g, b, transparency)
+    }
+
+    pub fn from_hex(hex: &str) -> Option<Self> {
+        if hex.len() != 7 || !hex.starts_with('#') {
+            return None;
+        }
+        let hex = &hex[1..];
+        let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
+        let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
+        let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
+        let color_iterator = Color::iter();
+        for color in color_iterator {
+            let color_value = color.value();
+            if r == (color_value[0] * 255.0) as u8
+                && g == (color_value[1] * 255.0) as u8
+                && b == (color_value[2] * 255.0) as u8
+            {
+                return Some(color);
+            }
+        }
+        None
+    }
+
     pub fn to_hex(&self) -> String {
         let [r, g, b] = self.value();
         format!(
@@ -363,7 +422,7 @@ impl Color {
             mixed.red,
             mixed.green,
             mixed.blue,
-            color_1.w * dt + color_2.w * (1.0 - dt),
+            color_1.w, // Both colors should have the same alpha
         )
     }
 

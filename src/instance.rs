@@ -91,7 +91,7 @@ impl Instance {
                 instance_state,
             },
             ColorMethod::DistToCenter(color_1, color_2) => {
-                let lerp_amount = (position.magnitude() / settings.domain_magnitude).min(1.0);
+                let lerp_amount = (position.magnitude() / settings.domain_max_dist_from_center).min(1.0);
                 let color = Color::lerp_color(color_2, color_1, lerp_amount);
                 Instance {
                     position,
@@ -288,7 +288,7 @@ impl InstanceManager {
         // SimulationMode::Gpu => {
         //     // Maybe use the gpu to sort the instances
         // }
-        return start.elapsed();
+        start.elapsed()
     }
 
     #[cfg(not(feature = "multithreading"))]
@@ -417,7 +417,7 @@ impl InstanceManager {
         );
     }
 
-    pub fn update_transparency(&mut self, settings: &Settings) -> bool {
+    pub fn update_transparency(&mut self, settings: &Settings) {
         let mut new_flattened = Vec::new();
         for layer in self.instances.iter_mut() {
             for row in layer.iter_mut() {
@@ -429,13 +429,10 @@ impl InstanceManager {
                 }
             }
         }
-        let adjust_buffer_size_required =
-            self.check_if_new_buffer_needs_to_be_created(new_flattened.len());
         self.flattened = new_flattened;
-        adjust_buffer_size_required
     }
 
-    pub fn update_space_between_instances(&mut self, settings: &Settings) -> bool {
+    pub fn update_space_between_instances(&mut self, settings: &Settings) {
         let mut new_flattened = Vec::new();
         for (x, layer) in self.instances.iter_mut().enumerate() {
             for (y, row) in layer.iter_mut().enumerate() {
@@ -453,10 +450,7 @@ impl InstanceManager {
                 }
             }
         }
-        let adjust_buffer_size_required =
-            self.check_if_new_buffer_needs_to_be_created(new_flattened.len());
         self.flattened = new_flattened;
-        adjust_buffer_size_required
     }
 
     pub fn increase_domain_size(&mut self, settings: &Settings) -> Option<UpdateEnum> {
@@ -598,12 +592,20 @@ impl InstanceManager {
                                     let dt = (instance.instance_state.fade_level
                                         / (settings.simulation_rules.num_states - 1))
                                         as f32;
+                                    let mut c1 = c1;
+                                    let mut c2 = c2;
+                                    c1.w = settings.transparency;
+                                    c2.w = settings.transparency;
                                     Color::lerp_color(c2, c1, dt)
                                 }
                                 ColorMethod::DistToCenter(c1, c2) => {
                                     let lerp_amount = (instance.position.magnitude()
-                                        / settings.domain_magnitude)
+                                        / settings.domain_max_dist_from_center)
                                         .min(1.0);
+                                    let mut c1 = c1;
+                                    let mut c2 = c2;
+                                    c1.w = settings.transparency;
+                                    c2.w = settings.transparency;
                                     Color::lerp_color(c2, c1, lerp_amount)
                                 }
                                 ColorMethod::Neighbor(c1, c2) => {
@@ -613,6 +615,10 @@ impl InstanceManager {
                                             .neighbor_method
                                             .total_num_neighbors()
                                             as f32;
+                                    let mut c1 = c1;
+                                    let mut c2 = c2;
+                                    c1.w = settings.transparency;
+                                    c2.w = settings.transparency;
                                     Color::lerp_color(c2, c1, dt)
                                 }
                             }

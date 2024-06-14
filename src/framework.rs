@@ -1,5 +1,10 @@
 use crate::{
-    simulation::{ColorMethod, SimulationRules},
+    constants::{
+        CUBE_SIZE, DEFAULT_DOMAIN_SIZE, DEFAULT_FONT_SIZE, DEFAULT_LINE_HEIGHT_MULTIPLIER,
+        DEFAULT_NOISE_AMOUNT, DEFAULT_SIMULATION_TICK_RATE, DEFAULT_SPAWN_SIZE,
+        DEFAULT_TRANSPARENCY, FRAME_COUNTER_UPDATE_INTERVAL, MIN_SPACE_BETWEEN_INSTANCES,
+    },
+    simulation::{ColorMethod, ColorType, SimulationRules},
     utils::{CommandLineArgs, UpdateEnum, UpdateQueue, Validator},
 };
 use std::{sync::Arc, time::Instant};
@@ -326,7 +331,7 @@ pub async fn start<E: App>(title: &str, command_line_args: CommandLineArgs) {
     let window_loop = EventLoopWrapper::new(title);
     let mut surface = SurfaceWrapper::new();
     let context = AppContext::init_async::<E>(&mut surface, window_loop.window.clone()).await;
-    let mut frame_counter = FrameCounter::new(0.1);
+    let mut frame_counter = FrameCounter::new(FRAME_COUNTER_UPDATE_INTERVAL);
 
     // We wait to create the app until we have a valid surface.
     let mut app = None;
@@ -447,16 +452,10 @@ pub struct Settings {
     pub world_grid_active: bool,
     pub help_gui_active: bool,
     pub domain_size: u32,
-    pub max_domain_size: u32,
-    pub domain_magnitude: f32,
+    pub domain_max_dist_from_center: f32,
     pub cube_size: f32,
     pub space_between_instances: f32,
     pub transparency: f32,
-    pub num_instances_step_size: u32,
-    pub transparency_step_size: f32,
-    pub space_between_step_size: f32,
-    pub angle_threshold_for_sort: f32,
-    pub translation_threshold_for_sort: f32,
     pub simulation_tick_rate: u16,
     pub last_simulation_tick: std::time::Instant,
     pub spawn_size: u8,
@@ -465,6 +464,9 @@ pub struct Settings {
     pub color_method: ColorMethod,
     pub simulation_mode: SimulationMode,
     pub debug_mode: bool,
+    pub font_size: f32,
+    pub line_height_multiplier: f32,
+    pub initial_color_type: ColorType,
 }
 
 impl Default for Settings {
@@ -475,39 +477,37 @@ impl Default for Settings {
 
 impl Settings {
     pub fn new(command_line_args: CommandLineArgs) -> Self {
-        let default_transparency = 0.1;
         let simulation_rules = SimulationRules::parse_rules(command_line_args.rules.as_deref());
-        let color_method = ColorMethod::parse_method(
+        let (color_method, initial_color_type) = ColorMethod::parse_method(
             command_line_args.color_method.as_deref(),
-            default_transparency,
+            DEFAULT_TRANSPARENCY,
         );
         let simulation_tick_rate = Validator::validate_simulation_tick_rate(
-            command_line_args.simulation_tick_rate.unwrap_or(10),
+            command_line_args
+                .simulation_tick_rate
+                .unwrap_or(DEFAULT_SIMULATION_TICK_RATE),
         );
-        let domain_size =
-            Validator::validate_domain_size(command_line_args.domain_size.unwrap_or(20));
-        let domain_magnitude = Self::prepare_domain_magnitude(&domain_size);
+        let domain_size = Validator::validate_domain_size(
+            command_line_args.domain_size.unwrap_or(DEFAULT_DOMAIN_SIZE),
+        );
+        let domain_magnitude = Self::calculate_max_distance_from_center(&domain_size);
         let spawn_size = Validator::validate_spawn_size(
-            command_line_args.initial_spawn_size.unwrap_or(10),
+            command_line_args
+                .initial_spawn_size
+                .unwrap_or(DEFAULT_SPAWN_SIZE),
             domain_size as u8,
         );
         // Add 1 to avoid no noise on setting noise to 1 as it will calculate random offset from 0 to 1
         // which is not visible in the grid, hence we need at least 2 to see the noise
-        let noise_amount =
-            (Validator::validate_noise_amount(command_line_args.noise_level.unwrap_or(0)) + 1)
-                .min(10);
+        let noise_amount = Validator::validate_noise_amount(
+            command_line_args
+                .noise_level
+                .unwrap_or(DEFAULT_NOISE_AMOUNT),
+        );
 
         let bounding_box_active = false;
         let world_grid_active = !command_line_args.disable_world_grid;
         let help_gui_active = false;
-        let cube_size = 1.0;
-        let space_between_instances = 0.1;
-        let num_instances_step_size = 2;
-        let transparency_step_size = 0.1;
-        let space_between_step_size = 0.05;
-        let angle_threshold_for_sort = 0.10;
-        let translation_threshold_for_sort = 10.0;
-        let max_domain_size = 100;
         let last_simulation_tick = std::time::Instant::now();
 
         #[cfg(feature = "multithreading")]
@@ -526,16 +526,10 @@ impl Settings {
             world_grid_active,
             help_gui_active,
             domain_size,
-            max_domain_size,
-            domain_magnitude,
-            cube_size,
-            space_between_instances,
-            transparency: default_transparency,
-            num_instances_step_size,
-            transparency_step_size,
-            space_between_step_size,
-            angle_threshold_for_sort,
-            translation_threshold_for_sort,
+            space_between_instances: MIN_SPACE_BETWEEN_INSTANCES,
+            domain_max_dist_from_center: domain_magnitude,
+            cube_size: CUBE_SIZE,
+            transparency: DEFAULT_TRANSPARENCY,
             simulation_tick_rate,
             last_simulation_tick,
             spawn_size,
@@ -544,6 +538,9 @@ impl Settings {
             color_method,
             simulation_mode,
             debug_mode: command_line_args.debug,
+            font_size: DEFAULT_FONT_SIZE,
+            line_height_multiplier: DEFAULT_LINE_HEIGHT_MULTIPLIER,
+            initial_color_type,
         }
     }
 
@@ -587,13 +584,14 @@ impl Settings {
             }
         }
         self.domain_size = validated_domain_size;
-        self.domain_magnitude = Self::prepare_domain_magnitude(&self.domain_size);
+        self.domain_max_dist_from_center =
+            Self::calculate_max_distance_from_center(&self.domain_size);
         log::info!("Domain size set to: {}", self.domain_size);
     }
 
-    pub fn prepare_domain_magnitude(domain_size: &u32) -> f32 {
-        // calculate the distance from 0,0,0 to domain_size,domain_size,domain_size
-        3.0_f32.cbrt() * *domain_size as f32
+    pub fn calculate_max_distance_from_center(domain_size: &u32) -> f32 {
+        // calculate the distance from 0,0,0 to domain_size, domain_size, domain_size, used for ColorMethod::DistToCenter
+        ((domain_size.pow(2) * 3) as f32).sqrt()
     }
 
     pub fn set_transparency(&mut self, transparency: f32, update_queue: &mut UpdateQueue) {

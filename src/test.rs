@@ -61,204 +61,239 @@ mod rule_parse_tests {
 
 #[cfg(test)]
 mod color_method_parse_tests {
-    use cgmath::Vector4;
-
-    use crate::{constants::DEFAULT_COLORS, simulation::ColorMethod};
+    use crate::{
+        constants::DEFAULT_TRANSPARENCY,
+        simulation::{ColorMethod, ColorMethodType, ColorType},
+        utils::Color,
+    };
 
     #[test]
-    fn parse_color() {
-        let color_method = ColorMethod::parse_method(Some("S/H/#FF00FF"), 1.0);
+    fn single() {
+        let test_color_method_type = ColorMethodType::Single;
+        let test_color_type = ColorType::PreDefined;
+        let test_color = Color::Orange;
+
+        let test_string = format!(
+            "{}/{}/{}",
+            test_color_method_type, test_color_type, test_color
+        );
+
         assert_eq!(
-            color_method,
-            ColorMethod::Single(Vector4::new(1.0, 0.0, 1.0, 1.0))
+            ColorMethod::parse_method(Some(&test_string), DEFAULT_TRANSPARENCY),
+            (
+                ColorMethod::Single(test_color.as_vec4(DEFAULT_TRANSPARENCY)),
+                test_color_type
+            )
         );
     }
 
     #[test]
     fn state_lerp() {
-        let color_method = ColorMethod::parse_method(Some("SL/H/#FFFF00/#00FFFF"), 1.0);
+        let test_color_method_type = ColorMethodType::StateLerp;
+        let test_color_type = ColorType::PreDefined;
+        let test_color1 = Color::Orange;
+        let test_color2 = Color::Cyan;
+
+        let test_string = format!(
+            "{}/{}/{}/{}",
+            test_color_method_type, test_color_type, test_color1, test_color2
+        );
+
         assert_eq!(
-            color_method,
-            ColorMethod::StateLerp(
-                Vector4::new(1.0, 1.0, 0.0, 1.0),
-                Vector4::new(0.0, 1.0, 1.0, 1.0)
+            ColorMethod::parse_method(Some(&test_string), DEFAULT_TRANSPARENCY),
+            (
+                ColorMethod::StateLerp(
+                    test_color1.as_vec4(DEFAULT_TRANSPARENCY),
+                    test_color2.as_vec4(DEFAULT_TRANSPARENCY)
+                ),
+                test_color_type
             )
         );
     }
 
     #[test]
     fn dist_to_center() {
-        let color_method = ColorMethod::parse_method(Some("DTC/H/#FFFF00/#00FFFF"), 1.0);
+        let test_color_method_type = ColorMethodType::DistToCenter;
+        let test_color_type = ColorType::PreDefined;
+        let test_color1 = Color::Orange;
+        let test_color2 = Color::Cyan;
+
+        let test_string = format!(
+            "{}/{}/{}/{}",
+            test_color_method_type, test_color_type, test_color1, test_color2
+        );
+
         assert_eq!(
-            color_method,
-            ColorMethod::DistToCenter(
-                Vector4::new(1.0, 1.0, 0.0, 1.0),
-                Vector4::new(0.0, 1.0, 1.0, 1.0)
+            ColorMethod::parse_method(Some(&test_string), DEFAULT_TRANSPARENCY),
+            (
+                ColorMethod::DistToCenter(
+                    test_color1.as_vec4(DEFAULT_TRANSPARENCY),
+                    test_color2.as_vec4(DEFAULT_TRANSPARENCY)
+                ),
+                test_color_type
             )
         );
     }
 
     #[test]
     fn neighbor() {
-        let color_method = ColorMethod::parse_method(Some("N/H/#FFFF00/#00FFFF"), 1.0);
+        let test_color_method_type = ColorMethodType::Neighbor;
+        let test_color_type = ColorType::PreDefined;
+        let test_color1 = Color::Orange;
+        let test_color2 = Color::Cyan;
+
+        let test_string = format!(
+            "{}/{}/{}/{}",
+            test_color_method_type, test_color_type, test_color1, test_color2
+        );
+
         assert_eq!(
-            color_method,
-            ColorMethod::Neighbor(
-                Vector4::new(1.0, 1.0, 0.0, 1.0),
-                Vector4::new(0.0, 1.0, 1.0, 1.0)
+            ColorMethod::parse_method(Some(&test_string), DEFAULT_TRANSPARENCY),
+            (
+                ColorMethod::Neighbor(
+                    test_color1.as_vec4(DEFAULT_TRANSPARENCY),
+                    test_color2.as_vec4(DEFAULT_TRANSPARENCY)
+                ),
+                test_color_type
             )
         );
     }
 
     #[test]
-    fn invalid_format() {
-        let color_method = ColorMethod::parse_method(Some("S/H/#FF0000/#00FF00"), 1.0);
-        assert_eq!(
-            color_method,
-            ColorMethod::Single(Vector4::new(
-                DEFAULT_COLORS[0][0],
-                DEFAULT_COLORS[0][1],
-                DEFAULT_COLORS[0][2],
-                DEFAULT_COLORS[0][3]
-            ))
-        );
-    }
-
-    #[test]
     fn no_method() {
-        let color_method = ColorMethod::parse_method(None, 1.0);
         assert_eq!(
-            color_method,
-            ColorMethod::Single(Vector4::new(
-                DEFAULT_COLORS[0][0],
-                DEFAULT_COLORS[0][1],
-                DEFAULT_COLORS[0][2],
-                DEFAULT_COLORS[0][3]
-            ))
+            ColorMethod::parse_method(None, DEFAULT_TRANSPARENCY),
+            (ColorMethod::new(DEFAULT_TRANSPARENCY), ColorType::default())
         );
     }
 
     #[test]
     fn invalid_color_type() {
-        let color_method = ColorMethod::parse_method(Some("S/X/#FFFFFF"), 1.0);
+        let test_color_method_type = ColorMethodType::Single;
+        let test_color_type = "This is not a color type";
+        let test_color1 = Color::Orange;
+        let test_color2 = Color::Cyan;
+
+        let test_string = format!(
+            "{}/{}/{}/{}",
+            test_color_method_type, test_color_type, test_color1, test_color2
+        );
+
         assert_eq!(
-            color_method,
-            ColorMethod::Single(Vector4::new(
-                DEFAULT_COLORS[0][0],
-                DEFAULT_COLORS[0][1],
-                DEFAULT_COLORS[0][2],
-                DEFAULT_COLORS[0][3]
-            ))
+            ColorMethod::parse_method(Some(&test_string), DEFAULT_TRANSPARENCY),
+            (ColorMethod::new(DEFAULT_TRANSPARENCY), ColorType::default())
         );
     }
 
     #[test]
-    fn invalid_color_format() {
-        let color_method = ColorMethod::parse_method(Some("S/H/#FF00"), 1.0);
+    fn invalid_color_format_hex() {
+        let test_color_method_type = ColorMethodType::Single;
+        let test_color_type = ColorType::Hex;
+        let test_color = "#FF0";
+        let test_string = format!(
+            "{}/{}/{}",
+            test_color_method_type, test_color_type, test_color
+        );
+
         assert_eq!(
-            color_method,
-            ColorMethod::Single(Vector4::new(
-                DEFAULT_COLORS[0][0],
-                DEFAULT_COLORS[0][1],
-                DEFAULT_COLORS[0][2],
-                DEFAULT_COLORS[0][3]
-            ))
+            ColorMethod::parse_method(Some(&test_string), DEFAULT_TRANSPARENCY),
+            (ColorMethod::new(DEFAULT_TRANSPARENCY), test_color_type)
         );
     }
 
     #[test]
     fn invalid_color_format_0_1() {
-        let color_method = ColorMethod::parse_method(Some("S/1/2.0,5.0,0.0"), 1.0);
+        let test_color_method_type = ColorMethodType::Single;
+        let test_color_type = ColorType::ZeroTo1;
+        let test_color = "1.0,2.0,3.0";
+        let test_string = format!(
+            "{}/{}/{}",
+            test_color_method_type, test_color_type, test_color
+        );
+
         assert_eq!(
-            color_method,
-            ColorMethod::Single(Vector4::new(
-                DEFAULT_COLORS[0][0],
-                DEFAULT_COLORS[0][1],
-                DEFAULT_COLORS[0][2],
-                DEFAULT_COLORS[0][3]
-            ))
+            ColorMethod::parse_method(Some(&test_string), DEFAULT_TRANSPARENCY),
+            (ColorMethod::new(DEFAULT_TRANSPARENCY), test_color_type)
         );
     }
 
     #[test]
     fn invalid_color_format_0_255() {
-        let color_method = ColorMethod::parse_method(Some("S/255/256,310,0"), 1.0);
+        let test_color_method_type = ColorMethodType::Single;
+        let test_color_type = ColorType::ZeroTo255;
+        let test_color = "255,256,257";
+        let test_string = format!(
+            "{}/{}/{}",
+            test_color_method_type, test_color_type, test_color
+        );
+
         assert_eq!(
-            color_method,
-            ColorMethod::Single(Vector4::new(
-                DEFAULT_COLORS[0][0],
-                DEFAULT_COLORS[0][1],
-                DEFAULT_COLORS[0][2],
-                DEFAULT_COLORS[0][3]
-            ))
+            ColorMethod::parse_method(Some(&test_string), DEFAULT_TRANSPARENCY),
+            (ColorMethod::new(DEFAULT_TRANSPARENCY), test_color_type)
         );
     }
 
     #[test]
     fn wrong_number_of_colors() {
-        let color_method = ColorMethod::parse_method(Some("SL/H/#000000"), 1.0);
+        let test_color_method_type = ColorMethodType::Single;
+        let test_color_type = ColorType::PreDefined;
+        let test_color1 = Color::Orange;
+        let test_color2 = Color::Cyan;
+
+        let test_string = format!(
+            "{}/{}/{}/{}",
+            test_color_method_type, test_color_type, test_color1, test_color2
+        );
+
         assert_eq!(
-            color_method,
-            ColorMethod::Single(Vector4::new(
-                DEFAULT_COLORS[0][0],
-                DEFAULT_COLORS[0][1],
-                DEFAULT_COLORS[0][2],
-                DEFAULT_COLORS[0][3]
-            ))
+            ColorMethod::parse_method(Some(&test_string), DEFAULT_TRANSPARENCY),
+            (ColorMethod::new(DEFAULT_TRANSPARENCY), test_color_type)
         );
     }
 
     #[test]
     fn weird_spacing() {
-        let color_method = ColorMethod::parse_method(Some(" SL / H/  #00FFFF  / #0000FF"), 1.0);
+        let test_color_method_type = ColorMethodType::Single;
+        let test_color_type = ColorType::PreDefined;
+        let test_color = Color::Orange;
+        let test_string = format!(
+            "   {} /{} /   {}    ",
+            test_color_method_type, test_color_type, test_color
+        );
+
         assert_eq!(
-            color_method,
-            ColorMethod::StateLerp(
-                Vector4::new(0.0, 1.0, 1.0, 1.0),
-                Vector4::new(0.0, 0.0, 1.0, 1.0)
+            ColorMethod::parse_method(Some(&test_string), DEFAULT_TRANSPARENCY),
+            (
+                ColorMethod::Single(test_color.as_vec4(DEFAULT_TRANSPARENCY)),
+                test_color_type
             )
         );
     }
 
     #[test]
     fn wrong_separator() {
-        let color_method = ColorMethod::parse_method(Some("SL/H/#00FFFF-#0000FF"), 1.0);
+        let test_color_method_type = ColorMethodType::Single;
+        let test_color_type = ColorType::PreDefined;
+        let test_color = Color::Orange;
+        let test_string = format!(
+            "{},{},{}",
+            test_color_method_type, test_color_type, test_color
+        );
+
         assert_eq!(
-            color_method,
-            ColorMethod::Single(Vector4::new(
-                DEFAULT_COLORS[0][0],
-                DEFAULT_COLORS[0][1],
-                DEFAULT_COLORS[0][2],
-                DEFAULT_COLORS[0][3]
-            ))
+            ColorMethod::parse_method(Some(&test_string), DEFAULT_TRANSPARENCY),
+            (ColorMethod::new(DEFAULT_TRANSPARENCY), test_color_type)
         );
     }
-
-    #[test]
-    fn wrong_separator2() {
-        let color_method = ColorMethod::parse_method(Some("SL/H/#00FFFF,#0000FF"), 1.0);
-        assert_eq!(
-            color_method,
-            ColorMethod::Single(Vector4::new(
-                DEFAULT_COLORS[0][0],
-                DEFAULT_COLORS[0][1],
-                DEFAULT_COLORS[0][2],
-                DEFAULT_COLORS[0][3]
-            ))
-        );
-    }
-
     #[test]
     fn no_color() {
-        let color_method = ColorMethod::parse_method(Some("SL/H/"), 1.0);
+        let test_color_method_type = ColorMethodType::Single;
+        let test_color_type = ColorType::Hex;
+        let test_string = format!("{}/{}", test_color_method_type, test_color_type);
+
         assert_eq!(
-            color_method,
-            ColorMethod::Single(Vector4::new(
-                DEFAULT_COLORS[0][0],
-                DEFAULT_COLORS[0][1],
-                DEFAULT_COLORS[0][2],
-                DEFAULT_COLORS[0][3]
-            ))
+            ColorMethod::parse_method(Some(&test_string), DEFAULT_TRANSPARENCY),
+            (ColorMethod::new(DEFAULT_TRANSPARENCY), ColorType::default())
         );
     }
 }

@@ -13,3 +13,4 @@ A multithreaded 3D cellular automata implementation in Rust with wgpu
 - [ ] Limit how fast a user can spam the keys to avoid trying to access for e.g. self.instances before increase_num_instances has finished
 - [ ] Add Easing Functions for Color Lerp
 - [ ] Text GUI for changing the rules, showing keybindings, etc
+- [ ] Keybinding Refactor

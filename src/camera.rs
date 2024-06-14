@@ -7,7 +7,9 @@ use winit::{
     keyboard::{Key, NamedKey},
 };
 
-use crate::constants::{OPENGL_TO_WGPU_MATRIX, SAFE_FRAC_PI_2};
+use crate::constants::{
+    DEFAULT_CAMERA_SENSITIVITY, DEFAULT_CAMERA_SPEED, OPENGL_TO_WGPU_MATRIX, SAFE_FRAC_PI_2,
+};
 
 #[derive(Debug, Clone, Copy)]
 pub struct Camera {
@@ -251,9 +253,9 @@ pub fn setup_camera(
     wgpu::BindGroupLayout,
     wgpu::BindGroup,
 ) {
-    let camera = Camera::new((40.0, 20.0, 40.0), cgmath::Deg(-135.0), cgmath::Deg(-20.0));
-    let projection = Projection::new(config.width, config.height, cgmath::Deg(45.0), 0.1, 100.0);
-    let camera_controller = CameraController::new(10.0, 0.6);
+    let camera = Camera::new((55.0, 30.0, 55.0), cgmath::Deg(-135.0), cgmath::Deg(-25.0));
+    let projection = Projection::new(config.width, config.height, cgmath::Deg(50.0), 0.1, 100.0);
+    let camera_controller = CameraController::new(DEFAULT_CAMERA_SPEED, DEFAULT_CAMERA_SENSITIVITY);
 
     let mut camera_uniform = CameraUniform::new();
     camera_uniform.update_view_proj(&camera, &projection);

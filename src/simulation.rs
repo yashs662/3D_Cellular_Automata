@@ -1,6 +1,6 @@
 use crate::{constants::DEFAULT_COLORS, utils::Color};
 use cgmath::Vector4;
-use std::str::FromStr;
+use std::{fmt::Display, str::FromStr};
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum SimulationState {
@@ -107,7 +107,7 @@ impl CellState {
 /// Color Method to use
 /// This will determine how the colors are calculated for the simulation.
 /// accepts hex values or color range from 0-1 or 0-255 in three channels red green adn blue (no Alpha).
-/// Append with H for hex, 1 for 0-1, 255 for 0-255, and D for predefined colors. you can use predefined colors with
+/// Append with H for hex, 1 for 0-1, 255 for 0-255, and PD for predefined colors. you can use predefined colors with
 /// any option to mix and match but can only use predefined colors when using the D option.
 /// The options are S (Single), SL (StateLerp), DTC (DistToCenter), N (Neighbor).
 ///
@@ -124,13 +124,74 @@ impl CellState {
 /// N/H/#FF0000/#00FF00,
 /// N/1/1.0,0.0,0.0/0.0,1.0,0.0,
 /// N/255/255,0,0/0,255,0,
-/// SL/D/Red/Green,
+/// SL/PD/Red/Green,
 /// SL/H/#FF0000/Green
-#[derive(Debug)]
-enum ColorChannelEnum {
-    Red,
-    Green,
-    Blue,
+#[derive(Default, Copy, Clone, Debug, PartialEq)]
+pub enum ColorType {
+    Hex,
+    ZeroTo1,
+    ZeroTo255,
+    #[default]
+    PreDefined,
+}
+
+impl FromStr for ColorType {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "H" => Ok(ColorType::Hex),
+            "1" => Ok(ColorType::ZeroTo1),
+            "255" => Ok(ColorType::ZeroTo255),
+            "PD" => Ok(ColorType::PreDefined),
+            _ => Err(()),
+        }
+    }
+}
+
+impl Display for ColorType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ColorType::Hex => write!(f, "H"),
+            ColorType::ZeroTo1 => write!(f, "1"),
+            ColorType::ZeroTo255 => write!(f, "255"),
+            ColorType::PreDefined => write!(f, "PD"),
+        }
+    }
+}
+
+#[derive(Default, PartialEq)]
+pub enum ColorMethodType {
+    #[default]
+    Single,
+    StateLerp,
+    DistToCenter,
+    Neighbor,
+}
+
+impl FromStr for ColorMethodType {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "S" => Ok(ColorMethodType::Single),
+            "SL" => Ok(ColorMethodType::StateLerp),
+            "DTC" => Ok(ColorMethodType::DistToCenter),
+            "N" => Ok(ColorMethodType::Neighbor),
+            _ => Err(()),
+        }
+    }
+}
+
+impl Display for ColorMethodType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ColorMethodType::Single => write!(f, "S"),
+            ColorMethodType::StateLerp => write!(f, "SL"),
+            ColorMethodType::DistToCenter => write!(f, "DTC"),
+            ColorMethodType::Neighbor => write!(f, "N"),
+        }
+    }
 }
 
 #[derive(Debug, PartialEq)]
@@ -142,17 +203,13 @@ pub enum ColorMethod {
 }
 
 impl ColorMethod {
-    fn new(default_transparency: f32) -> Self {
-        ColorMethod::Single(Vector4::new(
-            DEFAULT_COLORS[0][0],
-            DEFAULT_COLORS[0][1],
-            DEFAULT_COLORS[0][2],
-            default_transparency,
-        ))
+    pub fn new(default_transparency: f32) -> Self {
+        ColorMethod::StateLerp(
+            DEFAULT_COLORS[0].as_vec4(default_transparency),
+            DEFAULT_COLORS[1].as_vec4(default_transparency),
+        )
     }
-}
 
-impl ColorMethod {
     pub fn to_int(&self) -> u32 {
         match self {
             ColorMethod::Single(_) => 0,
@@ -162,72 +219,130 @@ impl ColorMethod {
         }
     }
 
-    pub fn parse_method(method: Option<&str>, default_transparency: f32) -> ColorMethod {
+    pub fn parse_method(
+        method: Option<&str>,
+        default_transparency: f32,
+    ) -> (ColorMethod, ColorType) {
         if method.is_none() {
             log::warn!("No color method provided, using default method");
-            return ColorMethod::new(default_transparency);
+            return (ColorMethod::new(default_transparency), ColorType::default());
         }
         let method = method.unwrap();
         let parsed_method = {
             let parts: Vec<&str> = method.split('/').collect();
-            if parts.len() < 3 {
-                log::error!("Invalid color method format");
-                log::warn!(
-                    "Color method format must be 'method/type/color1/color2' where color2 is optional"
-                );
-                log::warn!("Using default method");
-                return ColorMethod::new(default_transparency);
-            }
+
             let method_type = parts[0].replace(' ', "");
-            let method_type = method_type.as_str();
+            let method_type = if let Ok(method_type) = ColorMethodType::from_str(&method_type) {
+                method_type
+            } else {
+                log::error!("Invalid color method, must be 'S', 'SL', 'DTC', or 'N'");
+                log::warn!("Using default method");
+                ColorMethodType::default()
+            };
+
+            if method_type == ColorMethodType::Single && parts.len() != 3 {
+                log::error!("Color method '{}' requires only one color", method_type);
+                log::warn!("Using default method");
+                return (ColorMethod::new(default_transparency), ColorType::default());
+            } else if method_type != ColorMethodType::Single && parts.len() != 4 {
+                log::error!("Color method '{}' requires only two colors", method_type);
+                log::warn!("Using default method");
+                return (ColorMethod::new(default_transparency), ColorType::default());
+            }
+
             let color_type = parts[1].replace(' ', "");
-            let color_type = color_type.as_str();
+            let color_type = if let Ok(color_type) = ColorType::from_str(&color_type) {
+                color_type
+            } else {
+                log::error!("Invalid color type, must be 'H', '1', '255', or 'D'");
+                log::warn!("Using default method");
+                ColorType::default()
+            };
+
             let color1 = parts[2].replace(' ', "");
             let color1 = color1.as_str();
             let color2 = parts.get(3).copied();
 
-            match method_type {
-                "S" => ColorMethod::Single(Self::parse_color(
+            if method_type == ColorMethodType::Single {
+                (
+                    ColorMethod::Single(Self::parse_color(
+                        color_type,
+                        color1,
+                        true,
+                        default_transparency,
+                    )),
                     color_type,
-                    color1,
-                    true,
-                    default_transparency,
-                )),
-                "SL" | "DTC" | "N" => color2.map_or_else(
+                )
+            } else {
+                color2.map_or_else(
                     || {
                         log::error!(
                             "Color method '{}' requires two colors, only one provided",
                             method_type
                         );
                         log::warn!("Using default method");
-                        return ColorMethod::new(default_transparency);
+                        (ColorMethod::new(default_transparency), color_type)
                     },
                     |color2| {
                         let color2 = color2.replace(' ', "");
                         let color2 = color2.as_str();
 
                         match method_type {
-                            "SL" => ColorMethod::StateLerp(
-                                Self::parse_color(color_type, color1, true, default_transparency),
-                                Self::parse_color(color_type, color2, false, default_transparency),
+                            ColorMethodType::StateLerp => (
+                                ColorMethod::StateLerp(
+                                    Self::parse_color(
+                                        color_type,
+                                        color1,
+                                        true,
+                                        default_transparency,
+                                    ),
+                                    Self::parse_color(
+                                        color_type,
+                                        color2,
+                                        false,
+                                        default_transparency,
+                                    ),
+                                ),
+                                color_type,
                             ),
-                            "DTC" => ColorMethod::DistToCenter(
-                                Self::parse_color(color_type, color1, true, default_transparency),
-                                Self::parse_color(color_type, color2, false, default_transparency),
+                            ColorMethodType::DistToCenter => (
+                                ColorMethod::DistToCenter(
+                                    Self::parse_color(
+                                        color_type,
+                                        color1,
+                                        true,
+                                        default_transparency,
+                                    ),
+                                    Self::parse_color(
+                                        color_type,
+                                        color2,
+                                        false,
+                                        default_transparency,
+                                    ),
+                                ),
+                                color_type,
                             ),
-                            "N" => ColorMethod::Neighbor(
-                                Self::parse_color(color_type, color1, true, default_transparency),
-                                Self::parse_color(color_type, color2, false, default_transparency),
+                            ColorMethodType::Neighbor => (
+                                ColorMethod::Neighbor(
+                                    Self::parse_color(
+                                        color_type,
+                                        color1,
+                                        true,
+                                        default_transparency,
+                                    ),
+                                    Self::parse_color(
+                                        color_type,
+                                        color2,
+                                        false,
+                                        default_transparency,
+                                    ),
+                                ),
+                                color_type,
                             ),
                             _ => unreachable!(),
                         }
                     },
-                ),
-                _ => {
-                    log::error!("Invalid color method, must be 'S', 'SL', 'DTC', or 'N'");
-                    log::warn!("Using default method");
-                    return ColorMethod::new(default_transparency);
-                }
+                )
             }
         };
         log::debug!("Parsed color method: {:?}", parsed_method);
@@ -235,20 +350,19 @@ impl ColorMethod {
     }
 
     fn parse_color(
-        color_type: &str,
+        color_type: ColorType,
         color: &str,
         is_color_1: bool,
         default_transparency: f32,
     ) -> Vector4<f32> {
         match color_type {
-            "H" => Self::parse_hex_color(color, is_color_1, default_transparency),
-            "1" => Self::parse_0_1_color(color, is_color_1, default_transparency),
-            "255" => Self::parse_0_255_color(color, is_color_1, default_transparency),
-            "D" => Self::parse_predefined_color(color, is_color_1, default_transparency),
-            _ => {
-                log::error!("Invalid color type, must be 'H', '1', or '255'");
-                log::warn!("Using default color");
-                Self::get_default_color(is_color_1)
+            ColorType::Hex => Self::parse_hex_color(color, is_color_1, default_transparency),
+            ColorType::ZeroTo1 => Self::parse_0_1_color(color, is_color_1, default_transparency),
+            ColorType::ZeroTo255 => {
+                Self::parse_0_255_color(color, is_color_1, default_transparency)
+            }
+            ColorType::PreDefined => {
+                Self::parse_predefined_color(color, is_color_1, default_transparency)
             }
         }
     }
@@ -259,178 +373,176 @@ impl ColorMethod {
         default_transparency: f32,
     ) -> Vector4<f32> {
         let predefined_color = Color::from_str(color);
-        if predefined_color.is_ok() {
-            let color = predefined_color.unwrap().value();
-            Vector4::new(color[0], color[1], color[2], default_transparency)
+        if let Ok(predefined_color) = predefined_color {
+            predefined_color.as_vec4(default_transparency)
         } else {
             log::error!("{} No such color exists in Default Colors", color);
             log::warn!("Using default color");
-            Self::get_default_color(is_color_1)
+            Self::get_default_color(is_color_1, default_transparency)
         }
     }
 
     fn parse_hex_color(color: &str, is_color_1: bool, default_transparency: f32) -> Vector4<f32> {
-        if color.len() != 7 || !color.starts_with('#') {
+        if let Some(parsed_color) = Color::from_hex(color) {
+            parsed_color.as_vec4(default_transparency)
+        } else {
             let predefined_color = Color::from_str(color);
-            if predefined_color.is_ok() {
-                let color = predefined_color.unwrap().value();
-                return Vector4::new(color[0], color[1], color[2], default_transparency);
+            if let Ok(predefined_color) = predefined_color {
+                predefined_color.as_vec4(default_transparency)
             } else {
-                log::error!("Invalid color format");
+                log::error!("Invalid color format, Hex code '{}' is not valid", color);
                 log::warn!("Color format must be '#RRGGBB' or a predefined color");
                 log::warn!("Using default color");
-                return Self::get_default_color(is_color_1);
+                Self::get_default_color(is_color_1, default_transparency)
             }
-        }
-
-        let color = color.trim_start_matches('#');
-        let r = Self::parse_color_channel_for_hex(&color[0..2], is_color_1, ColorChannelEnum::Red);
-        let g =
-            Self::parse_color_channel_for_hex(&color[2..4], is_color_1, ColorChannelEnum::Green);
-        let b = Self::parse_color_channel_for_hex(&color[4..6], is_color_1, ColorChannelEnum::Blue);
-
-        Vector4::new(r, g, b, default_transparency)
-    }
-
-    fn parse_color_channel_for_hex(
-        channel: &str,
-        is_color_1: bool,
-        channel_type: ColorChannelEnum,
-    ) -> f32 {
-        let parsed = u8::from_str_radix(channel, 16);
-        if parsed.is_err() {
-            log::error!("Invalid color format");
-            log::warn!("Hex code '{}' is not valid", channel);
-            log::warn!(
-                "Using default color for channel {:?} of color{}",
-                channel_type,
-                if is_color_1 { "1" } else { "2" }
-            );
-            match channel_type {
-                ColorChannelEnum::Red => return Self::get_default_color(is_color_1)[0],
-                ColorChannelEnum::Green => return Self::get_default_color(is_color_1)[1],
-                ColorChannelEnum::Blue => return Self::get_default_color(is_color_1)[2],
-            }
-        }
-        parsed.unwrap() as f32 / 255.0
-    }
-
-    fn parse_color_channel_for_0_1(
-        channel: &str,
-        is_color_1: bool,
-        channel_type: ColorChannelEnum,
-    ) -> f32 {
-        let parsed = channel.parse::<f32>();
-        if parsed.is_err() {
-            log::error!("Invalid color format");
-            log::warn!("Color must be between '0.0-1.0'");
-            log::warn!("Using default color");
-            match channel_type {
-                ColorChannelEnum::Red => return Self::get_default_color(is_color_1)[0],
-                ColorChannelEnum::Green => return Self::get_default_color(is_color_1)[1],
-                ColorChannelEnum::Blue => return Self::get_default_color(is_color_1)[2],
-            }
-        }
-        let parsed = parsed.unwrap();
-        if !(0.0..=1.0).contains(&parsed) {
-            log::error!("Invalid color format");
-            log::warn!("Color must be between '0.0-1.0'");
-            log::warn!("Using default color");
-            match channel_type {
-                ColorChannelEnum::Red => Self::get_default_color(is_color_1)[0],
-                ColorChannelEnum::Green => Self::get_default_color(is_color_1)[1],
-                ColorChannelEnum::Blue => Self::get_default_color(is_color_1)[2],
-            }
-        } else {
-            parsed
         }
     }
 
-    fn parse_color_channel_for_0_255(
-        channel: &str,
-        is_color_1: bool,
-        channel_type: ColorChannelEnum,
-    ) -> f32 {
-        let parsed = channel.parse::<u8>();
-        if parsed.is_err() {
-            log::error!("Invalid color format");
-            log::warn!("Color must be between '0-255'");
-            log::warn!("Using default color");
-            match channel_type {
-                ColorChannelEnum::Red => return Self::get_default_color(is_color_1)[0],
-                ColorChannelEnum::Green => return Self::get_default_color(is_color_1)[1],
-                ColorChannelEnum::Blue => return Self::get_default_color(is_color_1)[2],
-            }
-        }
-        parsed.unwrap() as f32 / 255.0
-    }
-
-    fn get_default_color(is_color_1: bool) -> Vector4<f32> {
+    fn get_default_color(is_color_1: bool, default_transparency: f32) -> Vector4<f32> {
         if is_color_1 {
-            Vector4::new(
-                DEFAULT_COLORS[0][0],
-                DEFAULT_COLORS[0][1],
-                DEFAULT_COLORS[0][2],
-                DEFAULT_COLORS[0][3],
-            )
+            DEFAULT_COLORS[0].as_vec4(default_transparency)
         } else {
-            Vector4::new(
-                DEFAULT_COLORS[1][0],
-                DEFAULT_COLORS[1][1],
-                DEFAULT_COLORS[1][2],
-                DEFAULT_COLORS[1][3],
-            )
+            DEFAULT_COLORS[1].as_vec4(default_transparency)
         }
+    }
+
+    fn log_error_for_0_1_color() {
+        log::error!("Invalid color format");
+        log::warn!(
+            "Color format must be 'R,G,B' in the range 0.0 - 1.0 <Float> or a predefined color"
+        );
+        log::warn!("Using default color");
+    }
+
+    fn log_error_for_0_255_color() {
+        log::error!("Invalid color format");
+        log::warn!("Color format must be 'R,G,B' in the range 0 - 255 <Int> or a predefined color");
+        log::warn!("Using default color");
     }
 
     fn parse_0_1_color(color: &str, is_color_1: bool, default_transparency: f32) -> Vector4<f32> {
         let parts: Vec<&str> = color.split(',').collect();
-        if parts.len() != 3 {
+        if parts.len() != 3 || parts.iter().any(|part| part.parse::<f32>().is_err()) {
             let predefined_color = Color::from_str(color);
-            if predefined_color.is_ok() {
-                log::debug!("predefined color {:?}", predefined_color);
-                let color = predefined_color.unwrap().value();
-                return Vector4::new(color[0], color[1], color[2], default_transparency);
+            if let Ok(predefined_color) = predefined_color {
+                return predefined_color.as_vec4(default_transparency);
             } else {
-                log::error!("Invalid color format");
-                log::warn!(
-                    "Color format must be 'R,G,B' in the range 0.0 - 1.0 <Float> or a predefined color"
-                );
-                log::warn!("Using default color");
-                return Self::get_default_color(is_color_1);
+                Self::log_error_for_0_1_color();
+                return Self::get_default_color(is_color_1, default_transparency);
             }
         }
 
-        let r = Self::parse_color_channel_for_0_1(parts[0], is_color_1, ColorChannelEnum::Red);
-        let g = Self::parse_color_channel_for_0_1(parts[1], is_color_1, ColorChannelEnum::Green);
-        let b = Self::parse_color_channel_for_0_1(parts[2], is_color_1, ColorChannelEnum::Blue);
+        let rgb = parts
+            .iter()
+            .map(|part| part.parse::<f32>().unwrap())
+            .collect::<Vec<f32>>();
 
-        Vector4::new(r, g, b, default_transparency)
+        if let Some(color) = Color::from_value([rgb[0], rgb[1], rgb[2]]) {
+            color.as_vec4(default_transparency)
+        } else {
+            Self::log_error_for_0_1_color();
+            Self::get_default_color(is_color_1, default_transparency)
+        }
     }
 
     fn parse_0_255_color(color: &str, is_color_1: bool, default_transparency: f32) -> Vector4<f32> {
         let parts: Vec<&str> = color.split(',').collect();
         if parts.len() != 3 {
             let predefined_color = Color::from_str(color);
-            if predefined_color.is_ok() {
-                log::debug!("predefined color {:?}", predefined_color);
-                let color = predefined_color.unwrap().value();
-                return Vector4::new(color[0], color[1], color[2], default_transparency);
+            if let Ok(predefined_color) = predefined_color {
+                return predefined_color.as_vec4(default_transparency);
             } else {
-                log::error!("Invalid color format");
-                log::warn!(
-                    "Color format must be 'R,G,B' in the range 0 - 255 <Int> or a predefined color"
-                );
-                log::warn!("Using default color");
-                return Self::get_default_color(is_color_1);
+                Self::log_error_for_0_255_color();
+                return Self::get_default_color(is_color_1, default_transparency);
             }
         }
 
-        let r = Self::parse_color_channel_for_0_255(parts[0], is_color_1, ColorChannelEnum::Red);
-        let g = Self::parse_color_channel_for_0_255(parts[1], is_color_1, ColorChannelEnum::Green);
-        let b = Self::parse_color_channel_for_0_255(parts[2], is_color_1, ColorChannelEnum::Blue);
+        let rgb = parts
+            .iter()
+            .map(|part| part.parse::<f32>().unwrap() / 255.0)
+            .collect::<Vec<f32>>();
 
-        Vector4::new(r, g, b, default_transparency)
+        if let Some(color) = Color::from_value([rgb[0], rgb[1], rgb[2]]) {
+            color.as_vec4(default_transparency)
+        } else {
+            Self::log_error_for_0_255_color();
+            Self::get_default_color(is_color_1, default_transparency)
+        }
+    }
+
+    fn format_color_option(
+        color_option: Option<Color>,
+        default_color: cgmath::Vector4<f32>,
+    ) -> String {
+        match color_option {
+            Some(color) => color.to_string(),
+            None => format!(
+                "{:.1},{:.1},{:.1}",
+                default_color.x, default_color.y, default_color.z
+            ),
+        }
+    }
+
+    fn format_method(
+        prefix: &str,
+        color1: Option<Color>,
+        color2: Option<Color>,
+        default1: cgmath::Vector4<f32>,
+        default2: cgmath::Vector4<f32>,
+        initial_color_method: &ColorType,
+    ) -> String {
+        let color1_str = Self::format_color_option(color1, default1);
+        let color2_str = Self::format_color_option(color2, default2);
+        format!(
+            "{}/{}/{}/{}",
+            prefix, initial_color_method, color1_str, color2_str
+        )
+    }
+
+    pub fn to_formatted_string(&self, initial_color_type: &ColorType) -> String {
+        match self {
+            ColorMethod::Single(color) => {
+                let parsed_color = Color::from_value([color.x, color.y, color.z]);
+                let color_str = Self::format_color_option(parsed_color, *color);
+                format!("S/{}/{}", initial_color_type, color_str)
+            }
+            ColorMethod::StateLerp(color1, color2) => {
+                let parsed_color1 = Color::from_value([color1.x, color1.y, color1.z]);
+                let parsed_color2 = Color::from_value([color2.x, color2.y, color2.z]);
+                Self::format_method(
+                    "SL",
+                    parsed_color1,
+                    parsed_color2,
+                    *color1,
+                    *color2,
+                    initial_color_type,
+                )
+            }
+            ColorMethod::DistToCenter(color1, color2) => {
+                let parsed_color1 = Color::from_value([color1.x, color1.y, color1.z]);
+                let parsed_color2 = Color::from_value([color2.x, color2.y, color2.z]);
+                Self::format_method(
+                    "DTC",
+                    parsed_color1,
+                    parsed_color2,
+                    *color1,
+                    *color2,
+                    initial_color_type,
+                )
+            }
+            ColorMethod::Neighbor(color1, color2) => {
+                let parsed_color1 = Color::from_value([color1.x, color1.y, color1.z]);
+                let parsed_color2 = Color::from_value([color2.x, color2.y, color2.z]);
+                Self::format_method(
+                    "N",
+                    parsed_color1,
+                    parsed_color2,
+                    *color1,
+                    *color2,
+                    initial_color_type,
+                )
+            }
+        }
     }
 }
 
@@ -460,9 +572,9 @@ pub struct SimulationRules {
 impl Default for SimulationRules {
     fn default() -> Self {
         SimulationRules {
-            survival: vec![4],
-            birth: vec![4],
-            num_states: 5,
+            survival: vec![2, 6, 9],
+            birth: vec![4, 6, 8, 9, 10],
+            num_states: 10,
             neighbor_method: NeighborMethod::Moore,
         }
     }

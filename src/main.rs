@@ -1,9 +1,15 @@
 use cellular_automata_3d::{
     camera::{setup_camera, Camera, CameraController, CameraUniform, Projection},
-    constants::DEPTH_FORMAT,
+    constants::{
+        ANGLE_THRESHOLD_FOR_SORTING, DEPTH_FORMAT, DOMAIN_SIZE_STEP_SIZE, FONT_SIZE_STEP_SIZE,
+        LINE_HEIGHT_MULTIPLIER_STEP_SIZE, MAX_DOMAIN_SIZE, MAX_FONT_SIZE,
+        MAX_LINE_HEIGHT_MULTIPLIER, MIN_FONT_SIZE, MIN_LINE_HEIGHT_MULTIPLIER,
+        SPACE_BETWEEN_INSTANCES_STEP_SIZE, TRANSLATION_THRESHOLD_FOR_SORTING,
+        TRANSPARENCY_STEP_SIZE, WORLD_GRID_SIZE_MULTIPLIER,
+    },
     framework::Settings,
     instance::{Instance, InstanceManager, InstanceRaw},
-    simulation::SimulationState,
+    simulation::{ColorMethod, ColorType, SimulationState},
     texture::{self, Texture},
     utils::{init_logger, Color, CommandLineArgs, UpdateEnum, UpdateQueue},
     vertex::Vertex,
@@ -54,33 +60,135 @@ impl TextRenderLevel {
     }
 }
 
-struct TextRenderer {
+struct TextRenderBuffers {
+    pub fps_buffer: glyphon::Buffer,
+    pub info_buffer: glyphon::Buffer,
+    pub simulation_state_text_buffer: glyphon::Buffer,
+    pub debug_buffer: glyphon::Buffer,
+    pub calculated_offsets: Vec<f32>,
+    pub num_line_list: Vec<u8>,
+}
+
+impl TextRenderBuffers {
+    pub fn new(
+        font_system: &mut glyphon::FontSystem,
+        font_metrics: glyphon::Metrics,
+        physical_width: f32,
+        physical_height: f32,
+    ) -> Self {
+        // The number of lines in each buffer, currently 1 fps, 4 info, 1 simulation state, 3 debug lines
+        let num_line_list = vec![1, 4, 1, 3];
+        Self {
+            fps_buffer: Self::create_buffer(
+                font_system,
+                font_metrics,
+                physical_width,
+                physical_height,
+                "Loading...",
+            ),
+            info_buffer: Self::create_buffer(
+                font_system,
+                font_metrics,
+                physical_width,
+                physical_height,
+                "Loading...",
+            ),
+            debug_buffer: Self::create_buffer(
+                font_system,
+                font_metrics,
+                physical_width,
+                physical_height,
+                "Loading...",
+            ),
+            simulation_state_text_buffer: Self::create_buffer(
+                font_system,
+                font_metrics,
+                physical_width,
+                physical_height,
+                "Loading...",
+            ),
+            calculated_offsets: Vec::new(),
+            num_line_list,
+        }
+    }
+
+    fn calculate_vertical_offsets(&mut self, font_metrics: glyphon::Metrics) {
+        let top_padding = 10.0;
+        let mut calculated_offsets = Vec::new();
+        let mut current_offset = top_padding;
+        for i in 0..self.num_line_list.len() {
+            calculated_offsets.push(current_offset);
+            current_offset += font_metrics.line_height * self.num_line_list[i] as f32;
+        }
+        self.calculated_offsets = calculated_offsets;
+    }
+
+    fn update_font_metrics(
+        &mut self,
+        font_system: &mut glyphon::FontSystem,
+        font_metrics: glyphon::Metrics,
+    ) {
+        self.fps_buffer.set_metrics(font_system, font_metrics);
+        self.info_buffer.set_metrics(font_system, font_metrics);
+        self.simulation_state_text_buffer
+            .set_metrics(font_system, font_metrics);
+        self.debug_buffer.set_metrics(font_system, font_metrics);
+        self.calculate_vertical_offsets(font_metrics);
+    }
+
+    fn create_buffer(
+        font_system: &mut glyphon::FontSystem,
+        font_metrics: glyphon::Metrics,
+        physical_width: f32,
+        physical_height: f32,
+        default_text: &str,
+    ) -> glyphon::Buffer {
+        let mut buffer = glyphon::Buffer::new(font_system, font_metrics);
+        buffer.set_size(font_system, physical_width, physical_height);
+        buffer.set_text(
+            font_system,
+            default_text,
+            glyphon::Attrs::new().family(glyphon::Family::Monospace),
+            glyphon::Shaping::Advanced,
+        );
+        buffer
+    }
+}
+
+struct TextRenderManager {
     font_system: glyphon::FontSystem,
     swash_cache: glyphon::SwashCache,
     viewport: glyphon::Viewport,
     text_renderer: glyphon::TextRenderer,
     atlas: glyphon::TextAtlas,
     fps_level: TextRenderLevel,
-    simulation_stable_level: TextRenderLevel,
-    fps_buffer: glyphon::Buffer,
-    cpu_time_buffer: glyphon::Buffer,
-    simulation_time_buffer: glyphon::Buffer,
-    sort_time_buffer: glyphon::Buffer,
-    simulation_stable_text_buffer: glyphon::Buffer,
+    simulation_state_level: TextRenderLevel,
+    buffers: TextRenderBuffers,
+    font_metrics: glyphon::Metrics,
+    line_height_multiplier: f32,
+    color_method: String,
+    // TODO: This messes up lifetimes make it work
+    // text_areas: Vec<glyphon::TextArea>,
+    // text_attributes: glyphon::Attrs,
 }
 
-impl TextRenderer {
+impl TextRenderManager {
     pub fn new(
         device: &wgpu::Device,
         config: &wgpu::SurfaceConfiguration,
         queue: &wgpu::Queue,
         scale_factor: f64,
+        font_size: f32,
+        line_height_multiplier: f32,
+        initial_color_type: &ColorType,
+        color_method: &ColorMethod,
     ) -> Self {
         let mut font_system = glyphon::FontSystem::new();
         let swash_cache = glyphon::SwashCache::new();
         let cache = glyphon::Cache::new(device);
         let mut viewport = glyphon::Viewport::new(device, &cache);
         let mut atlas = glyphon::TextAtlas::new(device, queue, &cache, config.format);
+
         let text_renderer = glyphon::TextRenderer::new(
             &mut atlas,
             device,
@@ -94,13 +202,7 @@ impl TextRenderer {
             }),
         );
 
-        let font_metrics = glyphon::Metrics::new(20.0, 20.0);
-        let mut fps_buffer = glyphon::Buffer::new(&mut font_system, font_metrics);
-        let mut cpu_time_buffer = glyphon::Buffer::new(&mut font_system, font_metrics);
-        let mut simulation_time_buffer = glyphon::Buffer::new(&mut font_system, font_metrics);
-        let mut sort_time_buffer = glyphon::Buffer::new(&mut font_system, font_metrics);
-        let mut simulation_stable_text_buffer =
-            glyphon::Buffer::new(&mut font_system, font_metrics);
+        let font_metrics = glyphon::Metrics::new(font_size, font_size * line_height_multiplier);
 
         let physical_width = (config.width as f64 * scale_factor) as f32;
         let physical_height = (config.height as f64 * scale_factor) as f32;
@@ -113,47 +215,13 @@ impl TextRenderer {
             },
         );
 
-        fps_buffer.set_size(&mut font_system, physical_width, physical_height);
-        cpu_time_buffer.set_size(&mut font_system, physical_width, physical_height);
-        simulation_time_buffer.set_size(&mut font_system, physical_width, physical_height);
-        sort_time_buffer.set_size(&mut font_system, physical_width, physical_height);
-        simulation_stable_text_buffer.set_size(&mut font_system, physical_width, physical_height);
-
-        fps_buffer.set_text(
+        let mut buffers = TextRenderBuffers::new(
             &mut font_system,
-            "Frame time 0.00ms (0.0 FPS)",
-            glyphon::Attrs::new().family(glyphon::Family::SansSerif),
-            glyphon::Shaping::Advanced,
+            font_metrics,
+            physical_width,
+            physical_height,
         );
-        fps_buffer.shape_until_scroll(&mut font_system, false);
-        cpu_time_buffer.set_text(
-            &mut font_system,
-            "CPU time 0.00ms",
-            glyphon::Attrs::new().family(glyphon::Family::SansSerif),
-            glyphon::Shaping::Advanced,
-        );
-        cpu_time_buffer.shape_until_scroll(&mut font_system, false);
-        simulation_time_buffer.set_text(
-            &mut font_system,
-            "Simulation time 0.00ms",
-            glyphon::Attrs::new().family(glyphon::Family::SansSerif),
-            glyphon::Shaping::Advanced,
-        );
-        simulation_time_buffer.shape_until_scroll(&mut font_system, false);
-        sort_time_buffer.set_text(
-            &mut font_system,
-            "Sort time 0.00ms",
-            glyphon::Attrs::new().family(glyphon::Family::SansSerif),
-            glyphon::Shaping::Advanced,
-        );
-        sort_time_buffer.shape_until_scroll(&mut font_system, false);
-        simulation_stable_text_buffer.set_text(
-            &mut font_system,
-            "Simulation Active",
-            glyphon::Attrs::new().family(glyphon::Family::SansSerif),
-            glyphon::Shaping::Advanced,
-        );
-        simulation_stable_text_buffer.shape_until_scroll(&mut font_system, false);
+        buffers.calculate_vertical_offsets(font_metrics);
 
         Self {
             font_system,
@@ -162,12 +230,11 @@ impl TextRenderer {
             text_renderer,
             atlas,
             fps_level: TextRenderLevel::Warning,
-            simulation_stable_level: TextRenderLevel::Info,
-            fps_buffer,
-            cpu_time_buffer,
-            simulation_time_buffer,
-            sort_time_buffer,
-            simulation_stable_text_buffer,
+            simulation_state_level: TextRenderLevel::Info,
+            buffers,
+            font_metrics,
+            line_height_multiplier,
+            color_method: color_method.to_formatted_string(initial_color_type),
         }
     }
 
@@ -193,41 +260,33 @@ impl TextRenderer {
         debug_mode: bool,
     ) {
         let fps_text_area = glyphon::TextArea {
-            buffer: &self.fps_buffer,
+            buffer: &self.buffers.fps_buffer,
             left: 10.0,
-            top: 10.0,
+            top: self.buffers.calculated_offsets[0],
             scale: 1.0,
             bounds: glyphon::TextBounds::default(),
             default_color: self.fps_level.glyphon_color(),
         };
-        let simulation_stable_text_area = glyphon::TextArea {
-            buffer: &self.simulation_stable_text_buffer,
+        let info_text_area = glyphon::TextArea {
+            buffer: &self.buffers.info_buffer,
             left: 10.0,
-            top: 30.0,
+            top: self.buffers.calculated_offsets[1],
             scale: 1.0,
             bounds: glyphon::TextBounds::default(),
-            default_color: self.simulation_stable_level.glyphon_color(),
+            default_color: TextRenderLevel::Info.glyphon_color(),
         };
-        let cpu_time_text_area = glyphon::TextArea {
-            buffer: &self.cpu_time_buffer,
+        let simulation_state_text_area = glyphon::TextArea {
+            buffer: &self.buffers.simulation_state_text_buffer,
             left: 10.0,
-            top: 50.0,
+            top: self.buffers.calculated_offsets[2],
             scale: 1.0,
             bounds: glyphon::TextBounds::default(),
-            default_color: TextRenderLevel::Debug.glyphon_color(),
+            default_color: self.simulation_state_level.glyphon_color(),
         };
-        let simulation_time_text_area = glyphon::TextArea {
-            buffer: &self.simulation_time_buffer,
+        let debug_text_area = glyphon::TextArea {
+            buffer: &self.buffers.debug_buffer,
             left: 10.0,
-            top: 70.0,
-            scale: 1.0,
-            bounds: glyphon::TextBounds::default(),
-            default_color: TextRenderLevel::Debug.glyphon_color(),
-        };
-        let sort_time_text_area = glyphon::TextArea {
-            buffer: &self.sort_time_buffer,
-            left: 10.0,
-            top: 90.0,
+            top: self.buffers.calculated_offsets[3],
             scale: 1.0,
             bounds: glyphon::TextBounds::default(),
             default_color: TextRenderLevel::Debug.glyphon_color(),
@@ -236,13 +295,12 @@ impl TextRenderer {
         let text_areas = if debug_mode {
             vec![
                 fps_text_area,
-                simulation_stable_text_area,
-                cpu_time_text_area,
-                simulation_time_text_area,
-                sort_time_text_area,
+                info_text_area,
+                simulation_state_text_area,
+                debug_text_area,
             ]
         } else {
-            vec![fps_text_area, simulation_stable_text_area]
+            vec![fps_text_area, info_text_area, simulation_state_text_area]
         };
 
         self.text_renderer
@@ -266,14 +324,34 @@ impl TextRenderer {
         self.atlas.trim();
     }
 
+    pub fn update_font_size(&mut self, new_font_size: f32) {
+        self.font_metrics =
+            glyphon::Metrics::new(new_font_size, self.line_height_multiplier * new_font_size);
+        self.buffers
+            .update_font_metrics(&mut self.font_system, self.font_metrics);
+    }
+
+    pub fn update_line_height_multiplier(&mut self, new_line_height_multiplier: f32) {
+        // round to one decimal place
+        let new_line_height_multiplier = (new_line_height_multiplier * 10.0).round() / 10.0;
+        self.font_metrics = glyphon::Metrics::new(
+            self.font_metrics.font_size,
+            self.font_metrics.font_size * new_line_height_multiplier,
+        );
+        self.buffers
+            .update_font_metrics(&mut self.font_system, self.font_metrics);
+        self.line_height_multiplier = new_line_height_multiplier;
+    }
+
     pub fn update(
         &mut self,
         frame_time: f32,
         fps: f32,
         cpu_time: Duration,
-        last_simulation_time: Option<Duration>,
+        last_simulation_time: Duration,
         last_sort_time: Duration,
         simulation_state: SimulationState,
+        simulation_tick_rate: u16,
     ) {
         if fps < 30.0 {
             self.fps_level = TextRenderLevel::Error;
@@ -284,9 +362,9 @@ impl TextRenderer {
         }
 
         match simulation_state {
-            SimulationState::Active => self.simulation_stable_level = TextRenderLevel::Info,
-            SimulationState::Paused => self.simulation_stable_level = TextRenderLevel::Warning,
-            SimulationState::Stable => self.simulation_stable_level = TextRenderLevel::Debug,
+            SimulationState::Active => self.simulation_state_level = TextRenderLevel::Info,
+            SimulationState::Paused => self.simulation_state_level = TextRenderLevel::Warning,
+            SimulationState::Stable => self.simulation_state_level = TextRenderLevel::Debug,
         }
 
         let fps_text = if frame_time < 1.0 {
@@ -295,14 +373,14 @@ impl TextRenderer {
             format!("Frame time {:05.3}ms ({:.1} FPS)", frame_time, fps)
         };
         let cpu_time_text = if cpu_time.as_millis() < 1 {
-            format!("CPU time {:05.3}µs", cpu_time.as_micros() as f64 / 1000.0)
+            format!("CPU time {:05.3}µs", cpu_time.as_micros() as f64)
         } else {
             format!("CPU time {:05.3}ms", cpu_time.as_millis() as f64)
         };
         let sort_time_text = if last_sort_time.as_millis() < 1 {
             format!(
                 "Last Sort time {:05.3}µs",
-                last_sort_time.as_micros() as f64 / 1000.0
+                last_sort_time.as_micros() as f64
             )
         } else {
             format!(
@@ -310,62 +388,55 @@ impl TextRenderer {
                 last_sort_time.as_millis() as f64
             )
         };
+        let simulation_time_text = if last_simulation_time.as_millis() < 1 {
+            format!(
+                "Last Simulation time {:.2}µs",
+                last_simulation_time.as_micros()
+            )
+        } else {
+            format!(
+                "Last Simulation time {:.2}ms",
+                last_simulation_time.as_millis()
+            )
+        };
         let simulation_state_text = match simulation_state {
             SimulationState::Active => "Simulation Active",
             SimulationState::Paused => "Simulation Paused",
             SimulationState::Stable => "Simulation Stable, nothing to simulate",
         };
+        let debug_text = format!(
+            "{}\n{}\n{}",
+            cpu_time_text, simulation_time_text, sort_time_text
+        );
+        let info_text = format!(
+            "Font Size: {}\nLine Height Multiplier: {}\nColor Method: {}\nSimulation Tick Rate: {}ms",
+            self.font_metrics.font_size, self.line_height_multiplier, self.color_method, simulation_tick_rate
+        );
 
-        self.fps_buffer.set_text(
+        self.buffers.fps_buffer.set_text(
             &mut self.font_system,
             &fps_text,
-            glyphon::Attrs::new().family(glyphon::Family::SansSerif),
+            glyphon::Attrs::new().family(glyphon::Family::Monospace),
             glyphon::Shaping::Advanced,
         );
-        self.cpu_time_buffer.set_text(
+        self.buffers.info_buffer.set_text(
             &mut self.font_system,
-            &cpu_time_text,
-            glyphon::Attrs::new().family(glyphon::Family::SansSerif),
+            &info_text,
+            glyphon::Attrs::new().family(glyphon::Family::Monospace),
             glyphon::Shaping::Advanced,
         );
-        self.sort_time_buffer.set_text(
-            &mut self.font_system,
-            &sort_time_text,
-            glyphon::Attrs::new().family(glyphon::Family::SansSerif),
-            glyphon::Shaping::Advanced,
-        );
-        self.simulation_stable_text_buffer.set_text(
+        self.buffers.simulation_state_text_buffer.set_text(
             &mut self.font_system,
             simulation_state_text,
-            glyphon::Attrs::new().family(glyphon::Family::SansSerif),
+            glyphon::Attrs::new().family(glyphon::Family::Monospace),
             glyphon::Shaping::Advanced,
         );
-
-        // TODO: Check if this is necessary
-        self.fps_buffer
-            .shape_until_scroll(&mut self.font_system, false);
-        self.cpu_time_buffer
-            .shape_until_scroll(&mut self.font_system, false);
-        self.sort_time_buffer
-            .shape_until_scroll(&mut self.font_system, false);
-        self.simulation_stable_text_buffer
-            .shape_until_scroll(&mut self.font_system, false);
-
-        if let Some(simulation_time) = last_simulation_time {
-            let simulation_time_text = if simulation_time.as_millis() < 1 {
-                format!("Last Simulation time {:.2}µs", simulation_time.as_micros())
-            } else {
-                format!("Last Simulation time {:.2}ms", simulation_time.as_millis())
-            };
-            self.simulation_time_buffer.set_text(
-                &mut self.font_system,
-                &simulation_time_text,
-                glyphon::Attrs::new().family(glyphon::Family::SansSerif),
-                glyphon::Shaping::Advanced,
-            );
-            self.simulation_time_buffer
-                .shape_until_scroll(&mut self.font_system, false);
-        }
+        self.buffers.debug_buffer.set_text(
+            &mut self.font_system,
+            &debug_text,
+            glyphon::Attrs::new().family(glyphon::Family::Monospace),
+            glyphon::Shaping::Advanced,
+        );
     }
 }
 
@@ -432,9 +503,11 @@ struct App {
     world_grid_vertices: Vec<Vertex>,
     buffers: AppBuffers,
     pipelines: AppRenderPipelines,
-    text_renderer: TextRenderer,
+    text_renderer: TextRenderManager,
     last_sort_time: Duration,
     simulation_state: SimulationState,
+    last_simulation_time: Duration,
+    last_cpu_time: Duration,
 }
 
 impl App {
@@ -463,9 +536,9 @@ impl App {
         let yaw_diff = (self.camera.yaw - self.last_sort_camera.yaw).0.abs();
         let pitch_diff = (self.camera.pitch - self.last_sort_camera.pitch).0.abs();
         let translation_diff = self.camera.position - self.last_sort_camera.position;
-        if translation_diff.magnitude() > self.settings.translation_threshold_for_sort
-            || yaw_diff > self.settings.angle_threshold_for_sort
-            || pitch_diff > self.settings.angle_threshold_for_sort
+        if translation_diff.magnitude() > TRANSLATION_THRESHOLD_FOR_SORTING
+            || yaw_diff > ANGLE_THRESHOLD_FOR_SORTING
+            || pitch_diff > ANGLE_THRESHOLD_FOR_SORTING
         {
             self.update_queue.add(UpdateEnum::SortInstances);
         }
@@ -479,7 +552,7 @@ impl App {
             let start = std::time::Instant::now();
             if let Some(simulation_state) = self
                 .instance_manager
-                .simulate(&mut self.settings, &mut self.update_queue)
+                .simulate(&self.settings, &mut self.update_queue)
             {
                 self.simulation_state = simulation_state;
             }
@@ -498,19 +571,13 @@ impl App {
         for update in self.update_queue.iter() {
             match update {
                 UpdateEnum::Transparency => {
-                    if self.instance_manager.update_transparency(&self.settings) {
-                        scheduled_updates.push(UpdateEnum::CreateNewInstanceBuffer);
-                    }
+                    self.instance_manager.update_transparency(&self.settings);
                     scheduled_updates.push(UpdateEnum::SortInstances);
                     scheduled_updates.push(UpdateEnum::UpdateInstanceBuffer);
                 }
                 UpdateEnum::SpaceBetweenInstances => {
-                    if self
-                        .instance_manager
-                        .update_space_between_instances(&self.settings)
-                    {
-                        scheduled_updates.push(UpdateEnum::CreateNewInstanceBuffer);
-                    }
+                    self.instance_manager
+                        .update_space_between_instances(&self.settings);
                     scheduled_updates.push(UpdateEnum::UpdateBoundingBox);
                     scheduled_updates.push(UpdateEnum::UpdateWorldGrid);
                     scheduled_updates.push(UpdateEnum::SortInstances);
@@ -527,6 +594,10 @@ impl App {
                         self.instance_manager.increase_domain_size(&self.settings)
                     {
                         scheduled_updates.push(update_enum);
+                        scheduled_updates.push(UpdateEnum::SortInstances);
+                    } else {
+                        scheduled_updates.push(UpdateEnum::SortInstances);
+                        scheduled_updates.push(UpdateEnum::UpdateInstanceBuffer);
                     };
                     scheduled_updates.push(UpdateEnum::SortInstances);
                     scheduled_updates.push(UpdateEnum::UpdateWorldGrid);
@@ -537,8 +608,11 @@ impl App {
                         self.instance_manager.decrease_domain_size(&self.settings)
                     {
                         scheduled_updates.push(update_enum);
+                        scheduled_updates.push(UpdateEnum::SortInstances);
+                    } else {
+                        scheduled_updates.push(UpdateEnum::SortInstances);
+                        scheduled_updates.push(UpdateEnum::UpdateInstanceBuffer);
                     };
-                    scheduled_updates.push(UpdateEnum::SortInstances);
                     scheduled_updates.push(UpdateEnum::UpdateWorldGrid);
                     scheduled_updates.push(UpdateEnum::UpdateBoundingBox);
                 }
@@ -561,7 +635,8 @@ impl App {
                     self.buffers.instances = self.instance_manager.create_new_buffer(device);
                 }
                 UpdateEnum::UpdateWorldGrid => {
-                    let new_size = Instance::calculate_bounding_box_size(&self.settings) + 20.0;
+                    let new_size = Instance::calculate_bounding_box_size(&self.settings)
+                        * WORLD_GRID_SIZE_MULTIPLIER;
                     self.world_grid_vertices = Vertex::create_vertices_for_world_grid(new_size);
                     let world_grid_raw = self
                         .world_grid_vertices
@@ -569,8 +644,7 @@ impl App {
                         .map(|vertex| {
                             WorldGridRaw::new(
                                 *vertex,
-                                self.settings.domain_size as f32
-                                    / self.settings.max_domain_size as f32,
+                                self.settings.domain_size as f32 / MAX_DOMAIN_SIZE as f32,
                             )
                         })
                         .collect::<Vec<_>>();
@@ -710,14 +784,16 @@ impl cellular_automata_3d::framework::App for App {
                 "shaders/world_grid.wgsl"
             ))),
         });
-        let world_grid_size = Instance::calculate_bounding_box_size(&settings) + 20.0;
+        // TODO: Play with this value to find the offset that works best
+        let world_grid_size =
+            Instance::calculate_bounding_box_size(&settings) * WORLD_GRID_SIZE_MULTIPLIER;
         let world_grid_vertices = Vertex::create_vertices_for_world_grid(world_grid_size);
         let world_grid_raw = world_grid_vertices
             .iter()
             .map(|vertex| {
                 WorldGridRaw::new(
                     *vertex,
-                    settings.domain_size as f32 / settings.max_domain_size as f32,
+                    settings.domain_size as f32 / MAX_DOMAIN_SIZE as f32,
                 )
             })
             .collect::<Vec<_>>();
@@ -945,7 +1021,16 @@ impl cellular_automata_3d::framework::App for App {
             world_grid_overlay: world_grid_pipeline_depth,
         };
 
-        let text_renderer = TextRenderer::new(device, config, queue, scale_factor);
+        let text_renderer = TextRenderManager::new(
+            device,
+            config,
+            queue,
+            scale_factor,
+            settings.font_size,
+            settings.line_height_multiplier,
+            &settings.initial_color_type,
+            &settings.color_method,
+        );
 
         // Done
         App {
@@ -969,6 +1054,8 @@ impl cellular_automata_3d::framework::App for App {
             text_renderer,
             last_sort_time: sort_time,
             simulation_state: SimulationState::Paused,
+            last_simulation_time: Duration::default(),
+            last_cpu_time: Duration::default(),
         }
     }
 
@@ -988,27 +1075,43 @@ impl cellular_automata_3d::framework::App for App {
                         if s.as_str() == "p" {
                             self.settings.toggle_bounding_box();
                         } else if s.as_str() == "n" {
-                            self.settings.set_transparency(
-                                self.settings.transparency - self.settings.transparency_step_size,
-                                &mut self.update_queue,
-                            );
+                            if self.simulation_state == SimulationState::Active {
+                                log::warn!("Cannot alter transparency when simulation is active");
+                            } else {
+                                self.settings.set_transparency(
+                                    self.settings.transparency - TRANSPARENCY_STEP_SIZE,
+                                    &mut self.update_queue,
+                                );
+                            }
                         } else if s.as_str() == "m" {
-                            self.settings.set_transparency(
-                                self.settings.transparency + self.settings.transparency_step_size,
-                                &mut self.update_queue,
-                            );
+                            if self.simulation_state == SimulationState::Active {
+                                log::warn!("Cannot alter transparency when simulation is active");
+                            } else {
+                                self.settings.set_transparency(
+                                    self.settings.transparency + TRANSPARENCY_STEP_SIZE,
+                                    &mut self.update_queue,
+                                );
+                            }
                         } else if s.as_str() == "k" {
-                            self.settings.set_space_between_instances(
-                                self.settings.space_between_instances
-                                    - self.settings.space_between_step_size,
-                                &mut self.update_queue,
-                            );
+                            if self.simulation_state == SimulationState::Active {
+                                log::warn!("Cannot alter space between instances when simulation is active");
+                            } else {
+                                self.settings.set_space_between_instances(
+                                    self.settings.space_between_instances
+                                        - SPACE_BETWEEN_INSTANCES_STEP_SIZE,
+                                    &mut self.update_queue,
+                                );
+                            }
                         } else if s.as_str() == "l" {
-                            self.settings.set_space_between_instances(
-                                self.settings.space_between_instances
-                                    + self.settings.space_between_step_size,
-                                &mut self.update_queue,
-                            );
+                            if self.simulation_state == SimulationState::Active {
+                                log::warn!("Cannot alter space between instances when simulation is active");
+                            } else {
+                                self.settings.set_space_between_instances(
+                                    self.settings.space_between_instances
+                                        + SPACE_BETWEEN_INSTANCES_STEP_SIZE,
+                                    &mut self.update_queue,
+                                );
+                            }
                         } else if s.as_str() == "o" {
                             match self.simulation_state {
                                 SimulationState::Active => {
@@ -1032,17 +1135,79 @@ impl cellular_automata_3d::framework::App for App {
                         }
                     } else if let Key::Named(key) = logical_key {
                         if key == NamedKey::PageUp {
-                            self.settings.set_domain_size(
-                                self.settings.domain_size + self.settings.num_instances_step_size,
-                                &mut self.update_queue,
-                            );
+                            if self.simulation_state == SimulationState::Active {
+                                log::warn!("Cannot alter domain size when simulation is active");
+                            } else {
+                                self.settings.set_domain_size(
+                                    self.settings.domain_size + DOMAIN_SIZE_STEP_SIZE,
+                                    &mut self.update_queue,
+                                );
+                            }
                         } else if key == NamedKey::PageDown {
-                            self.settings.set_domain_size(
-                                self.settings
-                                    .domain_size
-                                    .saturating_sub(self.settings.num_instances_step_size),
-                                &mut self.update_queue,
-                            );
+                            if self.simulation_state == SimulationState::Active {
+                                log::warn!("Cannot alter domain size when simulation is active");
+                            } else {
+                                self.settings.set_domain_size(
+                                    self.settings.domain_size - DOMAIN_SIZE_STEP_SIZE,
+                                    &mut self.update_queue,
+                                );
+                            }
+                        } else if key == NamedKey::Home {
+                            let current_font_size = self.text_renderer.font_metrics.font_size;
+                            if current_font_size < MAX_FONT_SIZE {
+                                let new_font_size = current_font_size + FONT_SIZE_STEP_SIZE;
+                                self.text_renderer.update_font_size(new_font_size);
+                                log::info!("Font size increased to: {}", new_font_size);
+                            } else {
+                                log::warn!("Font size is already at maximum: {}", MAX_FONT_SIZE);
+                            }
+                        } else if key == NamedKey::End {
+                            let current_font_size = self.text_renderer.font_metrics.font_size;
+                            if current_font_size > MIN_FONT_SIZE {
+                                let new_font_size = current_font_size - FONT_SIZE_STEP_SIZE;
+                                self.text_renderer.update_font_size(new_font_size);
+                                log::info!("Font size decreased to: {}", new_font_size);
+                            } else {
+                                log::warn!("Font size is already at minimum: {}", MIN_FONT_SIZE);
+                            }
+                        } else if key == NamedKey::Insert {
+                            if self.text_renderer.line_height_multiplier
+                                < MAX_LINE_HEIGHT_MULTIPLIER
+                            {
+                                let new_line_height_multiplier =
+                                    self.text_renderer.line_height_multiplier
+                                        + LINE_HEIGHT_MULTIPLIER_STEP_SIZE;
+                                self.text_renderer
+                                    .update_line_height_multiplier(new_line_height_multiplier);
+                                log::info!(
+                                    "Line height multiplier increased to: {}",
+                                    new_line_height_multiplier
+                                );
+                            } else {
+                                log::warn!(
+                                    "Line height multiplier is already at maximum: {}",
+                                    MAX_LINE_HEIGHT_MULTIPLIER
+                                );
+                            }
+                        } else if key == NamedKey::Delete {
+                            if self.text_renderer.line_height_multiplier
+                                > MIN_LINE_HEIGHT_MULTIPLIER
+                            {
+                                let new_line_height_multiplier =
+                                    self.text_renderer.line_height_multiplier
+                                        - LINE_HEIGHT_MULTIPLIER_STEP_SIZE;
+                                self.text_renderer
+                                    .update_line_height_multiplier(new_line_height_multiplier);
+                                log::info!(
+                                    "Line height multiplier decreased to: {}",
+                                    new_line_height_multiplier
+                                );
+                            } else {
+                                log::warn!(
+                                    "Line height multiplier is already at minimum: {}",
+                                    MIN_LINE_HEIGHT_MULTIPLIER
+                                );
+                            }
                         }
                     }
                 }
@@ -1074,17 +1239,23 @@ impl cellular_automata_3d::framework::App for App {
         self.update_camera(dt, queue);
         self.transparency_update();
         self.queue_update(queue, device);
-        let simulation_time = self.simulation_update();
+        if let Some(simulation_time) = self.simulation_update() {
+            self.last_cpu_time = simulation_time + start.elapsed();
+            self.last_simulation_time = simulation_time;
+        };
+        if self.simulation_state != SimulationState::Active {
+            self.last_cpu_time = start.elapsed();
+        }
         // For any Scheduled updates
         self.queue_update(queue, device);
-        let cpu_time = start.elapsed();
         self.text_renderer.update(
             dt,
             avg_fps,
-            cpu_time,
-            simulation_time,
+            self.last_cpu_time,
+            self.last_simulation_time,
             self.last_sort_time,
             self.simulation_state.clone(),
+            self.settings.simulation_tick_rate,
         );
     }
 
