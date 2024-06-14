@@ -14,3 +14,4 @@ A multithreaded 3D cellular automata implementation in Rust with wgpu
 - [ ] Add Easing Functions for Color Lerp
 - [ ] Text GUI for changing the rules, showing keybindings, etc
 - [ ] Keybinding Refactor
+- [ ] Add a way to record gif's, video or take screenshots
