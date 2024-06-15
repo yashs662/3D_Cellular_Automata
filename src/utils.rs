@@ -413,7 +413,7 @@ impl Color {
     }
 
     pub fn lerp_color(color_1: Vector4<f32>, color_2: Vector4<f32>, dt: f32) -> Vector4<f32> {
-        let dt = dt.max(0.0).min(1.0);
+        let dt = dt.clamp(0.0, 1.0);
         let srgb_1 = Srgb::new(color_1.x, color_1.y, color_1.z);
         let srgb_2 = Srgb::new(color_2.x, color_2.y, color_2.z);
         let mixed = srgb_1.mix(srgb_2, dt);
