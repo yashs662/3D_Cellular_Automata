@@ -91,7 +91,8 @@ impl Instance {
                 instance_state,
             },
             ColorMethod::DistToCenter(color_1, color_2) => {
-                let lerp_amount = (position.magnitude() / settings.domain_max_dist_from_center).min(1.0);
+                let lerp_amount =
+                    (position.magnitude() / settings.domain_max_dist_from_center).min(1.0);
                 let color = Color::lerp_color(color_2, color_1, lerp_amount);
                 Instance {
                     position,
@@ -167,7 +168,7 @@ impl InstanceRaw {
 pub struct InstanceManager {
     instances: Vec<Vec<Vec<Instance>>>,
     flattened: Vec<Instance>,
-    bounding_box_instance: Instance,
+    pub bounding_box_instance: Instance,
 }
 
 impl InstanceManager {
@@ -640,5 +641,53 @@ impl InstanceManager {
 
     pub fn num_flattened_instances(&self) -> usize {
         self.flattened.len()
+    }
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct WorldGridRaw {
+    pub position: [f32; 4],
+    pub texture_coord: [f32; 2],
+    pub fade_distance: f32,
+}
+
+unsafe impl bytemuck::Pod for WorldGridRaw {}
+unsafe impl bytemuck::Zeroable for WorldGridRaw {}
+
+impl WorldGridRaw {
+    pub fn new(vertices: &[Vertex], fade_distance: f32) -> Vec<Self> {
+        vertices
+            .iter()
+            .map(|vertex| Self {
+                position: vertex.position,
+                texture_coord: vertex.texture_coord,
+                fade_distance,
+            })
+            .collect()
+    }
+
+    pub fn desc() -> wgpu::VertexBufferLayout<'static> {
+        wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<WorldGridRaw>() as wgpu::BufferAddress,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &[
+                wgpu::VertexAttribute {
+                    offset: 0,
+                    shader_location: 0,
+                    format: wgpu::VertexFormat::Float32x4,
+                },
+                wgpu::VertexAttribute {
+                    offset: mem::size_of::<[f32; 4]>() as wgpu::BufferAddress,
+                    shader_location: 1,
+                    format: wgpu::VertexFormat::Float32x2,
+                },
+                wgpu::VertexAttribute {
+                    offset: mem::size_of::<[f32; 6]>() as wgpu::BufferAddress,
+                    shader_location: 2,
+                    format: wgpu::VertexFormat::Float32,
+                },
+            ],
+        }
     }
 }

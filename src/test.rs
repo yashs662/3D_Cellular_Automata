@@ -5,49 +5,95 @@ mod rule_parse_tests {
 
     #[test]
     fn parse_rules() {
-        let rules = SimulationRules::parse_rules(Some("10/4/5/M"));
+        let correct_survival = vec![10];
+        let correct_birth = vec![4];
+        let correct_num_states = 5;
+        let correct_neighbor_method = NeighborMethod::Moore;
+        let correct_user_friendly_string = SimulationRules::prepare_user_friendly_string(
+            &correct_survival,
+            &correct_birth,
+            &correct_num_states,
+            &correct_neighbor_method,
+        );
         let correct = SimulationRules {
-            survival: vec![10],
-            birth: vec![4],
-            num_states: 5,
-            neighbor_method: NeighborMethod::Moore,
+            survival: correct_survival,
+            birth: correct_birth,
+            num_states: correct_num_states,
+            neighbor_method: correct_neighbor_method,
+            user_friendly_string: correct_user_friendly_string,
         };
+        let rules = SimulationRules::parse_rules(Some("10/4/5/M"));
         assert_eq!(rules, correct);
     }
 
     #[test]
     fn ranges() {
-        let rules = SimulationRules::parse_rules(Some("4-5/3-4/5/V"));
+        let correct_survival = vec![4, 5];
+        let correct_birth = vec![3, 4];
+        let correct_num_states = 5;
+        let correct_neighbor_method = NeighborMethod::VonNeumann;
+        let correct_user_friendly_string = SimulationRules::prepare_user_friendly_string(
+            &correct_survival,
+            &correct_birth,
+            &correct_num_states,
+            &correct_neighbor_method,
+        );
         let correct = SimulationRules {
-            survival: vec![4, 5],
-            birth: vec![3, 4],
-            num_states: 5,
-            neighbor_method: NeighborMethod::VonNeumann,
+            survival: correct_survival,
+            birth: correct_birth,
+            num_states: correct_num_states,
+            neighbor_method: correct_neighbor_method,
+            user_friendly_string: correct_user_friendly_string,
         };
+        let rules = SimulationRules::parse_rules(Some("4-5/3-4/5/V"));
         assert_eq!(rules, correct);
     }
 
     #[test]
     fn weird_spacing() {
-        let rules = SimulationRules::parse_rules(Some("4,5, 10 -15 /3,4/5/V"));
+        let correct_survival = vec![4, 5, 10, 11, 12, 13, 14, 15];
+        let correct_birth = vec![3, 4];
+        let correct_num_states = 5;
+        let correct_neighbor_method = NeighborMethod::VonNeumann;
+        let correct_user_friendly_string = SimulationRules::prepare_user_friendly_string(
+            &correct_survival,
+            &correct_birth,
+            &correct_num_states,
+            &correct_neighbor_method,
+        );
         let correct = SimulationRules {
-            survival: vec![4, 5, 10, 11, 12, 13, 14, 15],
-            birth: vec![3, 4],
-            num_states: 5,
-            neighbor_method: NeighborMethod::VonNeumann,
+            survival: correct_survival,
+            birth: correct_birth,
+            num_states: correct_num_states,
+            neighbor_method: correct_neighbor_method,
+            user_friendly_string: correct_user_friendly_string,
         };
+
+        let rules = SimulationRules::parse_rules(Some("4,5, 10 -15 /3,4/5/V"));
         assert_eq!(rules, correct);
     }
 
     #[test]
     fn empty_rules() {
-        let rules = SimulationRules::parse_rules(Some("//5/M"));
+        let default = SimulationRules::default();
+        let correct_survival = default.survival;
+        let correct_birth = default.birth;
+        let correct_num_states = 5;
+        let correct_neighbor_method = NeighborMethod::Moore;
+        let correct_user_friendly_string = SimulationRules::prepare_user_friendly_string(
+            &correct_survival,
+            &correct_birth,
+            &correct_num_states,
+            &correct_neighbor_method,
+        );
         let correct = SimulationRules {
-            survival: Vec::new(),
-            birth: Vec::new(),
-            num_states: 5,
-            neighbor_method: NeighborMethod::Moore,
+            survival: correct_survival,
+            birth: correct_birth,
+            num_states: correct_num_states,
+            neighbor_method: correct_neighbor_method,
+            user_friendly_string: correct_user_friendly_string,
         };
+        let rules = SimulationRules::parse_rules(Some("//5/M"));
         assert_eq!(rules, correct);
     }
 
@@ -62,7 +108,7 @@ mod rule_parse_tests {
 #[cfg(test)]
 mod color_method_parse_tests {
     use crate::{
-        constants::DEFAULT_TRANSPARENCY,
+        constants::{DEFAULT_COLORS, DEFAULT_TRANSPARENCY},
         simulation::{ColorMethod, ColorMethodType, ColorType},
         utils::Color,
     };
@@ -169,7 +215,7 @@ mod color_method_parse_tests {
 
     #[test]
     fn invalid_color_type() {
-        let test_color_method_type = ColorMethodType::Single;
+        let test_color_method_type = ColorMethodType::default();
         let test_color_type = "This is not a color type";
         let test_color1 = Color::Orange;
         let test_color2 = Color::Cyan;
@@ -187,12 +233,13 @@ mod color_method_parse_tests {
 
     #[test]
     fn invalid_color_format_hex() {
-        let test_color_method_type = ColorMethodType::Single;
-        let test_color_type = ColorType::Hex;
-        let test_color = "#FF0";
+        let test_color_method_type = ColorMethodType::default();
+        let test_color_type = ColorType::default();
+        let test_color1 = "#FF0";
+        let test_color2 = &DEFAULT_COLORS[1].to_hex();
         let test_string = format!(
-            "{}/{}/{}",
-            test_color_method_type, test_color_type, test_color
+            "{}/{}/{}/{}",
+            test_color_method_type, test_color_type, test_color1, test_color2
         );
 
         assert_eq!(
@@ -203,12 +250,13 @@ mod color_method_parse_tests {
 
     #[test]
     fn invalid_color_format_0_1() {
-        let test_color_method_type = ColorMethodType::Single;
-        let test_color_type = ColorType::ZeroTo1;
-        let test_color = "1.0,2.0,3.0";
+        let test_color_method_type = ColorMethodType::default();
+        let test_color_type = ColorType::default();
+        let test_color1 = "1.0,2.0,3.0";
+        let test_color2 = &DEFAULT_COLORS[1];
         let test_string = format!(
-            "{}/{}/{}",
-            test_color_method_type, test_color_type, test_color
+            "{}/{}/{}/{}",
+            test_color_method_type, test_color_type, test_color1, test_color2
         );
 
         assert_eq!(
@@ -219,12 +267,13 @@ mod color_method_parse_tests {
 
     #[test]
     fn invalid_color_format_0_255() {
-        let test_color_method_type = ColorMethodType::Single;
-        let test_color_type = ColorType::ZeroTo255;
-        let test_color = "255,256,257";
+        let test_color_method_type = ColorMethodType::default();
+        let test_color_type = ColorType::default();
+        let test_color1 = "255,256,257";
+        let test_color2 = &DEFAULT_COLORS[1];
         let test_string = format!(
-            "{}/{}/{}",
-            test_color_method_type, test_color_type, test_color
+            "{}/{}/{}/{}",
+            test_color_method_type, test_color_type, test_color1, test_color2
         );
 
         assert_eq!(

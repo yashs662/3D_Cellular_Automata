@@ -17,6 +17,27 @@ pub enum NeighborMethod {
     VonNeumann,
 }
 
+impl FromStr for NeighborMethod {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "M" => Ok(NeighborMethod::Moore),
+            "V" => Ok(NeighborMethod::VonNeumann),
+            _ => Err(()),
+        }
+    }
+}
+
+impl Display for NeighborMethod {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            NeighborMethod::Moore => write!(f, "M"),
+            NeighborMethod::VonNeumann => write!(f, "V"),
+        }
+    }
+}
+
 impl NeighborMethod {
     pub fn get_neighbor_iter(&self) -> &'static [(i32, i32, i32)] {
         match self {
@@ -567,16 +588,23 @@ pub struct SimulationRules {
     pub birth: Vec<u8>,
     pub num_states: u8,
     pub neighbor_method: NeighborMethod,
+    pub user_friendly_string: String,
+}
+
+impl Display for SimulationRules {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.user_friendly_string)
+    }
 }
 
 impl Default for SimulationRules {
     fn default() -> Self {
-        SimulationRules {
-            survival: vec![2, 6, 9],
-            birth: vec![4, 6, 8, 9, 10],
-            num_states: 10,
-            neighbor_method: NeighborMethod::Moore,
-        }
+        Self::new(
+            vec![2, 6, 9],
+            vec![4, 6, 8, 9, 10],
+            10,
+            NeighborMethod::Moore,
+        )
     }
 }
 
@@ -587,12 +615,60 @@ impl SimulationRules {
         num_states: u8,
         neighbor_method: NeighborMethod,
     ) -> Self {
+        let user_friendly_string =
+            Self::prepare_user_friendly_string(&survival, &birth, &num_states, &neighbor_method);
+
         SimulationRules {
             survival,
             birth,
             num_states,
             neighbor_method,
+            user_friendly_string,
         }
+    }
+
+    pub fn prepare_user_friendly_string(
+        survival: &[u8],
+        birth: &[u8],
+        num_states: &u8,
+        neighbor_method: &NeighborMethod,
+    ) -> String {
+        // compress the continuous numbers
+        let survival = Self::compress_continuous_numbers(survival);
+        let birth = Self::compress_continuous_numbers(birth);
+
+        format!(
+            "\nSurvival: {}\nBirth: {}\nNum States: {}\nNeighbor Method: {}",
+            survival, birth, num_states, neighbor_method
+        )
+    }
+
+    fn compress_continuous_numbers(numbers: &[u8]) -> String {
+        let mut compressed_numbers = String::new();
+        if numbers.is_empty() {
+            return compressed_numbers;
+        }
+        let mut start = numbers[0] as usize;
+        let mut end = numbers[0] as usize;
+        for number in 1..numbers.len() {
+            if number == end + 1 {
+                end = number;
+            } else {
+                if start == end {
+                    compressed_numbers.push_str(&format!("{},", start));
+                } else {
+                    compressed_numbers.push_str(&format!("{}-{},", start, end));
+                }
+                start = number;
+                end = number;
+            }
+        }
+        if start == end {
+            compressed_numbers.push_str(&format!("{}", start));
+        } else {
+            compressed_numbers.push_str(&format!("{}-{}", start, end));
+        }
+        compressed_numbers
     }
 
     pub fn parse_rules(rules: Option<&str>) -> SimulationRules {
@@ -624,17 +700,13 @@ impl SimulationRules {
         }
         let birth = birth.unwrap();
         let num_states = parts[2].parse::<u8>().unwrap();
-        let neighbor_method = match parts[3].as_str() {
-            "M" => NeighborMethod::Moore,
-            "V" => NeighborMethod::VonNeumann,
-            _ => {
-                log::error!(
-                    "Invalid neighbor method, must be 'M' for Moore or 'V' for Von Neumann"
-                );
-                log::warn!("Using default rules");
-                return SimulationRules::default();
-            }
+        let neighbour_method = NeighborMethod::from_str(parts[3].as_str());
+        if neighbour_method.is_err() {
+            log::error!("Invalid neighbor method, must be 'M' for Moore or 'V' for Von Neumann");
+            log::warn!("Using default rules");
+            return SimulationRules::default();
         };
+        let neighbor_method = neighbour_method.unwrap();
 
         let parsed_rules = SimulationRules::new(survival, birth, num_states, neighbor_method);
         log::debug!("Parsed rules: {:?}", parsed_rules);
@@ -647,8 +719,11 @@ impl SimulationRules {
     ) -> Result<Vec<u8>, ()> {
         let parts: Vec<&str> = rule_parts.split(',').collect();
         if parts.len() == 1 && parts[0].is_empty() {
-            log::debug!("{:?} parts {:?}", rule_to_parse, parts);
-            return Ok(Vec::new());
+            let default = SimulationRules::default();
+            return match rule_to_parse {
+                SimulationRuleParseEnum::Survival => Ok(default.survival),
+                SimulationRuleParseEnum::Birth => Ok(default.birth),
+            };
         }
 
         let mut rules = Vec::new();

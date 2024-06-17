@@ -2,7 +2,7 @@ use cgmath::Vector4;
 use clap::Parser;
 use colored::Colorize;
 use palette::{Mix, Srgb};
-use std::io::Write;
+use std::{f32::consts::FRAC_PI_4, io::Write};
 use strum::{Display, EnumIter, EnumString, IntoEnumIterator};
 
 use crate::constants::{
@@ -458,4 +458,14 @@ impl Color {
         let [r, g, b] = self.to_rgb_0_255();
         glyphon::Color::rgb(r, g, b)
     }
+}
+
+pub fn generate_matrix(aspect_ratio: f32) -> glam::Mat4 {
+    let projection = glam::Mat4::perspective_rh(FRAC_PI_4, aspect_ratio, 1.0, 1.0);
+    let view = glam::Mat4::look_at_rh(
+        glam::Vec3::new(1.5f32, -5.0, 3.0),
+        glam::Vec3::ZERO,
+        glam::Vec3::Z,
+    );
+    projection * view
 }

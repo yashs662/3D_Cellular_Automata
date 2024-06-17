@@ -1,494 +1,34 @@
 use cellular_automata_3d::{
-    camera::{setup_camera, Camera, CameraController, CameraUniform, Projection},
+    camera::{Camera, CameraController, CameraUniform, Projection},
     constants::{
-        ANGLE_THRESHOLD_FOR_SORTING, DEPTH_FORMAT, DOMAIN_SIZE_STEP_SIZE, FONT_SIZE_STEP_SIZE,
+        ANGLE_THRESHOLD_FOR_SORTING, DOMAIN_SIZE_STEP_SIZE, FONT_SIZE_STEP_SIZE,
         LINE_HEIGHT_MULTIPLIER_STEP_SIZE, MAX_DOMAIN_SIZE, MAX_FONT_SIZE,
         MAX_LINE_HEIGHT_MULTIPLIER, MIN_FONT_SIZE, MIN_LINE_HEIGHT_MULTIPLIER,
-        SPACE_BETWEEN_INSTANCES_STEP_SIZE, TRANSLATION_THRESHOLD_FOR_SORTING,
-        TRANSPARENCY_STEP_SIZE, WORLD_GRID_SIZE_MULTIPLIER,
+        MIN_USER_INPUT_INTERVAL, SPACE_BETWEEN_INSTANCES_STEP_SIZE,
+        TRANSLATION_THRESHOLD_FOR_SORTING, TRANSPARENCY_STEP_SIZE, WORLD_GRID_SIZE_MULTIPLIER,
     },
     framework::Settings,
-    instance::{Instance, InstanceManager, InstanceRaw},
-    simulation::{ColorMethod, ColorType, SimulationState},
+    graphics::{AppBuffers, AppRenderLayouts, AppRenderPipelines, AppShaders},
+    instance::{Instance, InstanceManager, WorldGridRaw},
+    simulation::SimulationState,
+    text_renderer::TextRenderManager,
     texture::{self, Texture},
-    utils::{init_logger, Color, CommandLineArgs, UpdateEnum, UpdateQueue},
+    utils::{generate_matrix, init_logger, Color, CommandLineArgs, UpdateEnum, UpdateQueue},
     vertex::Vertex,
 };
 use cgmath::InnerSpace;
 use clap::Parser;
-use std::{borrow::Cow, f32::consts, mem, time::Duration};
-use wgpu::{util::DeviceExt, PipelineCompilationOptions};
+use std::time::{Duration, Instant};
+use wgpu::util::DeviceExt;
 use winit::{
     event::{DeviceEvent, ElementState, KeyEvent, MouseButton, WindowEvent},
     keyboard::{Key, NamedKey},
 };
 
-struct AppBuffers {
-    pub cube_vertex: wgpu::Buffer,
-    pub cube_index: wgpu::Buffer,
-    pub uniform: wgpu::Buffer,
-    pub instances: wgpu::Buffer,
-    pub camera: wgpu::Buffer,
-    pub bounding_box_vertex: wgpu::Buffer,
-    pub bounding_box_index: wgpu::Buffer,
-    pub bounding_box_instance: wgpu::Buffer,
-    pub world_grid: wgpu::Buffer,
-}
-
-struct AppRenderPipelines {
-    pub main_simulation: wgpu::RenderPipeline,
-    pub bounding_box: Option<wgpu::RenderPipeline>,
-    pub world_grid: wgpu::RenderPipeline,
-    pub world_grid_overlay: wgpu::RenderPipeline,
-}
-
-enum TextRenderLevel {
-    Debug,
-    Info,
-    Warning,
-    Error,
-}
-
-impl TextRenderLevel {
-    pub fn glyphon_color(&self) -> glyphon::Color {
-        match self {
-            TextRenderLevel::Debug => Color::Green.to_glyphon_color(),
-            TextRenderLevel::Info => Color::White.to_glyphon_color(),
-            TextRenderLevel::Warning => Color::Orange.to_glyphon_color(),
-            TextRenderLevel::Error => Color::Red.to_glyphon_color(),
-        }
-    }
-}
-
-struct TextRenderBuffers {
-    pub fps_buffer: glyphon::Buffer,
-    pub info_buffer: glyphon::Buffer,
-    pub simulation_state_text_buffer: glyphon::Buffer,
-    pub debug_buffer: glyphon::Buffer,
-    pub calculated_offsets: Vec<f32>,
-    pub num_line_list: Vec<u8>,
-}
-
-impl TextRenderBuffers {
-    pub fn new(
-        font_system: &mut glyphon::FontSystem,
-        font_metrics: glyphon::Metrics,
-        physical_width: f32,
-        physical_height: f32,
-    ) -> Self {
-        // The number of lines in each buffer, currently 1 fps, 4 info, 1 simulation state, 3 debug lines
-        let num_line_list = vec![1, 4, 1, 3];
-        Self {
-            fps_buffer: Self::create_buffer(
-                font_system,
-                font_metrics,
-                physical_width,
-                physical_height,
-                "Loading...",
-            ),
-            info_buffer: Self::create_buffer(
-                font_system,
-                font_metrics,
-                physical_width,
-                physical_height,
-                "Loading...",
-            ),
-            debug_buffer: Self::create_buffer(
-                font_system,
-                font_metrics,
-                physical_width,
-                physical_height,
-                "Loading...",
-            ),
-            simulation_state_text_buffer: Self::create_buffer(
-                font_system,
-                font_metrics,
-                physical_width,
-                physical_height,
-                "Loading...",
-            ),
-            calculated_offsets: Vec::new(),
-            num_line_list,
-        }
-    }
-
-    fn calculate_vertical_offsets(&mut self, font_metrics: glyphon::Metrics) {
-        let top_padding = 10.0;
-        let mut calculated_offsets = Vec::new();
-        let mut current_offset = top_padding;
-        for i in 0..self.num_line_list.len() {
-            calculated_offsets.push(current_offset);
-            current_offset += font_metrics.line_height * self.num_line_list[i] as f32;
-        }
-        self.calculated_offsets = calculated_offsets;
-    }
-
-    fn update_font_metrics(
-        &mut self,
-        font_system: &mut glyphon::FontSystem,
-        font_metrics: glyphon::Metrics,
-    ) {
-        self.fps_buffer.set_metrics(font_system, font_metrics);
-        self.info_buffer.set_metrics(font_system, font_metrics);
-        self.simulation_state_text_buffer
-            .set_metrics(font_system, font_metrics);
-        self.debug_buffer.set_metrics(font_system, font_metrics);
-        self.calculate_vertical_offsets(font_metrics);
-    }
-
-    fn create_buffer(
-        font_system: &mut glyphon::FontSystem,
-        font_metrics: glyphon::Metrics,
-        physical_width: f32,
-        physical_height: f32,
-        default_text: &str,
-    ) -> glyphon::Buffer {
-        let mut buffer = glyphon::Buffer::new(font_system, font_metrics);
-        buffer.set_size(font_system, physical_width, physical_height);
-        buffer.set_text(
-            font_system,
-            default_text,
-            glyphon::Attrs::new().family(glyphon::Family::Monospace),
-            glyphon::Shaping::Advanced,
-        );
-        buffer
-    }
-}
-
-struct TextRenderManager {
-    font_system: glyphon::FontSystem,
-    swash_cache: glyphon::SwashCache,
-    viewport: glyphon::Viewport,
-    text_renderer: glyphon::TextRenderer,
-    atlas: glyphon::TextAtlas,
-    fps_level: TextRenderLevel,
-    simulation_state_level: TextRenderLevel,
-    buffers: TextRenderBuffers,
-    font_metrics: glyphon::Metrics,
-    line_height_multiplier: f32,
-    color_method: String,
-    // TODO: This messes up lifetimes make it work
-    // text_areas: Vec<glyphon::TextArea>,
-    // text_attributes: glyphon::Attrs,
-}
-
-impl TextRenderManager {
-    pub fn new(
-        device: &wgpu::Device,
-        config: &wgpu::SurfaceConfiguration,
-        queue: &wgpu::Queue,
-        scale_factor: f64,
-        font_size: f32,
-        line_height_multiplier: f32,
-        initial_color_type: &ColorType,
-        color_method: &ColorMethod,
-    ) -> Self {
-        let mut font_system = glyphon::FontSystem::new();
-        let swash_cache = glyphon::SwashCache::new();
-        let cache = glyphon::Cache::new(device);
-        let mut viewport = glyphon::Viewport::new(device, &cache);
-        let mut atlas = glyphon::TextAtlas::new(device, queue, &cache, config.format);
-
-        let text_renderer = glyphon::TextRenderer::new(
-            &mut atlas,
-            device,
-            wgpu::MultisampleState::default(),
-            Some(wgpu::DepthStencilState {
-                format: DEPTH_FORMAT,
-                depth_write_enabled: true,
-                depth_compare: wgpu::CompareFunction::Less,
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-        );
-
-        let font_metrics = glyphon::Metrics::new(font_size, font_size * line_height_multiplier);
-
-        let physical_width = (config.width as f64 * scale_factor) as f32;
-        let physical_height = (config.height as f64 * scale_factor) as f32;
-
-        viewport.update(
-            queue,
-            glyphon::Resolution {
-                width: config.width,
-                height: config.height,
-            },
-        );
-
-        let mut buffers = TextRenderBuffers::new(
-            &mut font_system,
-            font_metrics,
-            physical_width,
-            physical_height,
-        );
-        buffers.calculate_vertical_offsets(font_metrics);
-
-        Self {
-            font_system,
-            swash_cache,
-            viewport,
-            text_renderer,
-            atlas,
-            fps_level: TextRenderLevel::Warning,
-            simulation_state_level: TextRenderLevel::Info,
-            buffers,
-            font_metrics,
-            line_height_multiplier,
-            color_method: color_method.to_formatted_string(initial_color_type),
-        }
-    }
-
-    pub fn update_viewport_size(
-        &mut self,
-        config: &wgpu::SurfaceConfiguration,
-        queue: &wgpu::Queue,
-    ) {
-        self.viewport.update(
-            queue,
-            glyphon::Resolution {
-                width: config.width,
-                height: config.height,
-            },
-        );
-    }
-
-    pub fn render<'a>(
-        &'a mut self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        render_pass: &mut wgpu::RenderPass<'a>,
-        debug_mode: bool,
-    ) {
-        let fps_text_area = glyphon::TextArea {
-            buffer: &self.buffers.fps_buffer,
-            left: 10.0,
-            top: self.buffers.calculated_offsets[0],
-            scale: 1.0,
-            bounds: glyphon::TextBounds::default(),
-            default_color: self.fps_level.glyphon_color(),
-        };
-        let info_text_area = glyphon::TextArea {
-            buffer: &self.buffers.info_buffer,
-            left: 10.0,
-            top: self.buffers.calculated_offsets[1],
-            scale: 1.0,
-            bounds: glyphon::TextBounds::default(),
-            default_color: TextRenderLevel::Info.glyphon_color(),
-        };
-        let simulation_state_text_area = glyphon::TextArea {
-            buffer: &self.buffers.simulation_state_text_buffer,
-            left: 10.0,
-            top: self.buffers.calculated_offsets[2],
-            scale: 1.0,
-            bounds: glyphon::TextBounds::default(),
-            default_color: self.simulation_state_level.glyphon_color(),
-        };
-        let debug_text_area = glyphon::TextArea {
-            buffer: &self.buffers.debug_buffer,
-            left: 10.0,
-            top: self.buffers.calculated_offsets[3],
-            scale: 1.0,
-            bounds: glyphon::TextBounds::default(),
-            default_color: TextRenderLevel::Debug.glyphon_color(),
-        };
-
-        let text_areas = if debug_mode {
-            vec![
-                fps_text_area,
-                info_text_area,
-                simulation_state_text_area,
-                debug_text_area,
-            ]
-        } else {
-            vec![fps_text_area, info_text_area, simulation_state_text_area]
-        };
-
-        self.text_renderer
-            .prepare(
-                device,
-                queue,
-                &mut self.font_system,
-                &mut self.atlas,
-                &self.viewport,
-                text_areas,
-                &mut self.swash_cache,
-            )
-            .unwrap();
-
-        self.text_renderer
-            .render(&self.atlas, &self.viewport, render_pass)
-            .unwrap();
-    }
-
-    pub fn trim_atlas(&mut self) {
-        self.atlas.trim();
-    }
-
-    pub fn update_font_size(&mut self, new_font_size: f32) {
-        self.font_metrics =
-            glyphon::Metrics::new(new_font_size, self.line_height_multiplier * new_font_size);
-        self.buffers
-            .update_font_metrics(&mut self.font_system, self.font_metrics);
-    }
-
-    pub fn update_line_height_multiplier(&mut self, new_line_height_multiplier: f32) {
-        // round to one decimal place
-        let new_line_height_multiplier = (new_line_height_multiplier * 10.0).round() / 10.0;
-        self.font_metrics = glyphon::Metrics::new(
-            self.font_metrics.font_size,
-            self.font_metrics.font_size * new_line_height_multiplier,
-        );
-        self.buffers
-            .update_font_metrics(&mut self.font_system, self.font_metrics);
-        self.line_height_multiplier = new_line_height_multiplier;
-    }
-
-    pub fn update(
-        &mut self,
-        frame_time: f32,
-        fps: f32,
-        cpu_time: Duration,
-        last_simulation_time: Duration,
-        last_sort_time: Duration,
-        simulation_state: SimulationState,
-        simulation_tick_rate: u16,
-    ) {
-        if fps < 30.0 {
-            self.fps_level = TextRenderLevel::Error;
-        } else if fps < 60.0 {
-            self.fps_level = TextRenderLevel::Warning;
-        } else {
-            self.fps_level = TextRenderLevel::Info;
-        }
-
-        match simulation_state {
-            SimulationState::Active => self.simulation_state_level = TextRenderLevel::Info,
-            SimulationState::Paused => self.simulation_state_level = TextRenderLevel::Warning,
-            SimulationState::Stable => self.simulation_state_level = TextRenderLevel::Debug,
-        }
-
-        let fps_text = if frame_time < 1.0 {
-            format!("Frame time {:05.3}µs ({:.1} FPS)", frame_time * 1000.0, fps)
-        } else {
-            format!("Frame time {:05.3}ms ({:.1} FPS)", frame_time, fps)
-        };
-        let cpu_time_text = if cpu_time.as_millis() < 1 {
-            format!("CPU time {:05.3}µs", cpu_time.as_micros() as f64)
-        } else {
-            format!("CPU time {:05.3}ms", cpu_time.as_millis() as f64)
-        };
-        let sort_time_text = if last_sort_time.as_millis() < 1 {
-            format!(
-                "Last Sort time {:05.3}µs",
-                last_sort_time.as_micros() as f64
-            )
-        } else {
-            format!(
-                "Last Sort time {:05.3}ms",
-                last_sort_time.as_millis() as f64
-            )
-        };
-        let simulation_time_text = if last_simulation_time.as_millis() < 1 {
-            format!(
-                "Last Simulation time {:.2}µs",
-                last_simulation_time.as_micros()
-            )
-        } else {
-            format!(
-                "Last Simulation time {:.2}ms",
-                last_simulation_time.as_millis()
-            )
-        };
-        let simulation_state_text = match simulation_state {
-            SimulationState::Active => "Simulation Active",
-            SimulationState::Paused => "Simulation Paused",
-            SimulationState::Stable => "Simulation Stable, nothing to simulate",
-        };
-        let debug_text = format!(
-            "{}\n{}\n{}",
-            cpu_time_text, simulation_time_text, sort_time_text
-        );
-        let info_text = format!(
-            "Font Size: {}\nLine Height Multiplier: {}\nColor Method: {}\nSimulation Tick Rate: {}ms",
-            self.font_metrics.font_size, self.line_height_multiplier, self.color_method, simulation_tick_rate
-        );
-
-        self.buffers.fps_buffer.set_text(
-            &mut self.font_system,
-            &fps_text,
-            glyphon::Attrs::new().family(glyphon::Family::Monospace),
-            glyphon::Shaping::Advanced,
-        );
-        self.buffers.info_buffer.set_text(
-            &mut self.font_system,
-            &info_text,
-            glyphon::Attrs::new().family(glyphon::Family::Monospace),
-            glyphon::Shaping::Advanced,
-        );
-        self.buffers.simulation_state_text_buffer.set_text(
-            &mut self.font_system,
-            simulation_state_text,
-            glyphon::Attrs::new().family(glyphon::Family::Monospace),
-            glyphon::Shaping::Advanced,
-        );
-        self.buffers.debug_buffer.set_text(
-            &mut self.font_system,
-            &debug_text,
-            glyphon::Attrs::new().family(glyphon::Family::Monospace),
-            glyphon::Shaping::Advanced,
-        );
-    }
-}
-
-#[repr(C)]
-#[derive(Copy, Clone, Debug)]
-pub struct WorldGridRaw {
-    pub position: [f32; 4],
-    pub texture_coord: [f32; 2],
-    pub fade_distance: f32,
-}
-
-unsafe impl bytemuck::Pod for WorldGridRaw {}
-unsafe impl bytemuck::Zeroable for WorldGridRaw {}
-
-impl WorldGridRaw {
-    pub fn new(vertex: Vertex, fade_distance: f32) -> Self {
-        WorldGridRaw {
-            position: vertex.position,
-            texture_coord: vertex.texture_coord,
-            fade_distance,
-        }
-    }
-
-    pub fn desc() -> wgpu::VertexBufferLayout<'static> {
-        wgpu::VertexBufferLayout {
-            array_stride: std::mem::size_of::<WorldGridRaw>() as wgpu::BufferAddress,
-            step_mode: wgpu::VertexStepMode::Vertex,
-            attributes: &[
-                wgpu::VertexAttribute {
-                    offset: 0,
-                    shader_location: 0,
-                    format: wgpu::VertexFormat::Float32x4,
-                },
-                wgpu::VertexAttribute {
-                    offset: mem::size_of::<[f32; 4]>() as wgpu::BufferAddress,
-                    shader_location: 1,
-                    format: wgpu::VertexFormat::Float32x2,
-                },
-                wgpu::VertexAttribute {
-                    offset: mem::size_of::<[f32; 6]>() as wgpu::BufferAddress,
-                    shader_location: 2,
-                    format: wgpu::VertexFormat::Float32,
-                },
-            ],
-        }
-    }
-}
-
 struct App {
     bind_group: wgpu::BindGroup,
     instance_manager: InstanceManager,
-    num_indices: u32,
+    cube_num_indices: u32,
     camera: Camera,
     last_sort_camera: Camera,
     projection: Projection,
@@ -508,19 +48,10 @@ struct App {
     simulation_state: SimulationState,
     last_simulation_time: Duration,
     last_cpu_time: Duration,
+    last_user_input_instant: Instant,
 }
 
 impl App {
-    fn generate_matrix(aspect_ratio: f32) -> glam::Mat4 {
-        let projection = glam::Mat4::perspective_rh(consts::FRAC_PI_4, aspect_ratio, 1.0, 1.0);
-        let view = glam::Mat4::look_at_rh(
-            glam::Vec3::new(1.5f32, -5.0, 3.0),
-            glam::Vec3::ZERO,
-            glam::Vec3::Z,
-        );
-        projection * view
-    }
-
     fn update_camera(&mut self, dt: f32, queue: &wgpu::Queue) {
         self.camera_controller.update_camera(&mut self.camera, dt);
         self.camera_uniform
@@ -629,25 +160,20 @@ impl App {
                 }
                 UpdateEnum::UpdateInstanceBuffer => {
                     self.instance_manager
-                        .update_buffer(gpu_queue, &self.buffers.instances);
+                        .update_buffer(gpu_queue, &self.buffers.simulation_instances);
                 }
                 UpdateEnum::CreateNewInstanceBuffer => {
-                    self.buffers.instances = self.instance_manager.create_new_buffer(device);
+                    self.buffers.simulation_instances =
+                        self.instance_manager.create_new_buffer(device);
                 }
                 UpdateEnum::UpdateWorldGrid => {
                     let new_size = Instance::calculate_bounding_box_size(&self.settings)
                         * WORLD_GRID_SIZE_MULTIPLIER;
                     self.world_grid_vertices = Vertex::create_vertices_for_world_grid(new_size);
-                    let world_grid_raw = self
-                        .world_grid_vertices
-                        .iter()
-                        .map(|vertex| {
-                            WorldGridRaw::new(
-                                *vertex,
-                                self.settings.domain_size as f32 / MAX_DOMAIN_SIZE as f32,
-                            )
-                        })
-                        .collect::<Vec<_>>();
+                    let world_grid_raw = WorldGridRaw::new(
+                        &self.world_grid_vertices,
+                        self.settings.domain_size as f32 / MAX_DOMAIN_SIZE as f32,
+                    );
                     let new_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                         label: Some("World Grid Vertex Buffer"),
                         contents: bytemuck::cast_slice(&world_grid_raw),
@@ -676,37 +202,10 @@ impl cellular_automata_3d::framework::App for App {
         scale_factor: f64,
     ) -> Self {
         let settings = Settings::new(command_line_args.clone());
-        // Create the vertex and index buffers
-        let (vertex_data, index_data) = Vertex::create_vertices(settings.cube_size);
-        let (bounding_box_vertex_data, bounding_box_index_data) =
-            Vertex::create_vertices(Instance::calculate_bounding_box_size(&settings));
-        let vertex_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Vertex Buffer"),
-            contents: bytemuck::cast_slice(&vertex_data),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
-
-        let index_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Index Buffer"),
-            contents: bytemuck::cast_slice(&index_data),
-            usage: wgpu::BufferUsages::INDEX,
-        });
-
-        let bounding_box_vertex_buf =
-            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("Bounding Box Vertex Buffer"),
-                contents: bytemuck::cast_slice(&bounding_box_vertex_data),
-                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-            });
-
-        let bounding_box_index_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Bounding Box Index Buffer"),
-            contents: bytemuck::cast_slice(&bounding_box_index_data),
-            usage: wgpu::BufferUsages::INDEX,
-        });
-
+        let world_grid_size =
+            Instance::calculate_bounding_box_size(&settings) * WORLD_GRID_SIZE_MULTIPLIER;
+        let world_grid_vertices = Vertex::create_vertices_for_world_grid(world_grid_size);
         let mut instance_manager = InstanceManager::new(&settings);
-
         let (
             camera,
             projection,
@@ -715,312 +214,20 @@ impl cellular_automata_3d::framework::App for App {
             camera_buffer,
             camera_bind_group_layout,
             camera_bind_group,
-        ) = setup_camera(config, device);
-
-        let sort_time = instance_manager.sort_by_distance_to_camera(&camera);
-        let instance_buffer = instance_manager.create_new_buffer(device);
-
-        let bounding_box_instance = Instance::create_bounding_box(&settings);
-        let bounding_box_instance_buffer =
-            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("Bounding Box Instance Buffer"),
-                contents: bytemuck::cast_slice(&[bounding_box_instance.to_raw()]),
-                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-            });
-
-        // Create pipeline layout
-        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("Render Bind Group Layout"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: wgpu::BufferSize::new(64),
-                },
-                count: None,
-            }],
-        });
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("Render Pipeline Layout"),
-            bind_group_layouts: &[&bind_group_layout, &camera_bind_group_layout],
-            push_constant_ranges: &[],
-        });
-        let bounding_box_pipeline_layout =
-            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("Bounding Box Pipeline Layout"),
-                bind_group_layouts: &[&bind_group_layout, &camera_bind_group_layout],
-                push_constant_ranges: &[],
-            });
-
-        // Create other resources
-        let mx_total = Self::generate_matrix(config.width as f32 / config.height as f32);
-        let mx_ref: &[f32; 16] = mx_total.as_ref();
-        let uniform_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Uniform Buffer"),
-            contents: bytemuck::cast_slice(mx_ref),
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        });
-        let depth_texture = texture::Texture::create_depth_texture(device, config, "depth_texture");
-
-        // Create bind group
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            layout: &bind_group_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: uniform_buf.as_entire_binding(),
-            }],
-            label: None,
-        });
-
-        let cube_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: None,
-            source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(include_str!("shaders/shader.wgsl"))),
-        });
-        let world_grid_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: None,
-            source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(include_str!(
-                "shaders/world_grid.wgsl"
-            ))),
-        });
-        // TODO: Play with this value to find the offset that works best
-        let world_grid_size =
-            Instance::calculate_bounding_box_size(&settings) * WORLD_GRID_SIZE_MULTIPLIER;
-        let world_grid_vertices = Vertex::create_vertices_for_world_grid(world_grid_size);
-        let world_grid_raw = world_grid_vertices
-            .iter()
-            .map(|vertex| {
-                WorldGridRaw::new(
-                    *vertex,
-                    settings.domain_size as f32 / MAX_DOMAIN_SIZE as f32,
-                )
-            })
-            .collect::<Vec<_>>();
-        let world_grid_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("World Grid Vertex Buffer"),
-            contents: bytemuck::cast_slice(&world_grid_raw),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
-
-        let vertex_buffers = &[Vertex::desc(), InstanceRaw::desc()];
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Render Pipeline"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &cube_shader,
-                entry_point: "vs_main",
-                buffers: vertex_buffers,
-                compilation_options: PipelineCompilationOptions::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &cube_shader,
-                entry_point: "fs_main",
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: config.format,
-                    blend: Some(wgpu::BlendState {
-                        color: wgpu::BlendComponent {
-                            src_factor: wgpu::BlendFactor::SrcAlpha,
-                            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
-                            operation: wgpu::BlendOperation::Add,
-                        },
-                        alpha: wgpu::BlendComponent::OVER,
-                    }),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: PipelineCompilationOptions::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: None,
-                // Setting this to anything other than Fill requires Features::POLYGON_MODE_LINE
-                // or Features::POLYGON_MODE_POINT
-                polygon_mode: wgpu::PolygonMode::Fill,
-                // Requires Features::DEPTH_CLIP_CONTROL
-                unclipped_depth: false,
-                // Requires Features::CONSERVATIVE_RASTERIZATION
-                conservative: false,
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: DEPTH_FORMAT,
-                depth_write_enabled: true,
-                depth_compare: wgpu::CompareFunction::Less, // 1.
-                stencil: wgpu::StencilState::default(),     // 2.
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState {
-                count: 1,
-                mask: !0,
-                alpha_to_coverage_enabled: false,
-            },
-            // If the pipeline will be used with a multiview render pass, this
-            // indicates how many array layers the attachments will have.
-            multiview: None,
-        });
-
-        let pipeline_wire = if device
-            .features()
-            .contains(wgpu::Features::POLYGON_MODE_LINE)
-        {
-            let pipeline_wire = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: None,
-                layout: Some(&bounding_box_pipeline_layout),
-                vertex: wgpu::VertexState {
-                    module: &cube_shader,
-                    entry_point: "vs_main",
-                    buffers: vertex_buffers,
-                    compilation_options: PipelineCompilationOptions::default(),
-                },
-                fragment: Some(wgpu::FragmentState {
-                    module: &cube_shader,
-                    entry_point: "fs_wire",
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format: config.view_formats[0],
-                        blend: Some(wgpu::BlendState {
-                            color: wgpu::BlendComponent {
-                                operation: wgpu::BlendOperation::Add,
-                                src_factor: wgpu::BlendFactor::SrcAlpha,
-                                dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
-                            },
-                            alpha: wgpu::BlendComponent::REPLACE,
-                        }),
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                    compilation_options: PipelineCompilationOptions::default(),
-                }),
-                primitive: wgpu::PrimitiveState {
-                    front_face: wgpu::FrontFace::Ccw,
-                    cull_mode: None,
-                    polygon_mode: wgpu::PolygonMode::Line,
-                    ..Default::default()
-                },
-                depth_stencil: None,
-                multisample: wgpu::MultisampleState::default(),
-                multiview: None,
-            });
-            Some(pipeline_wire)
-        } else {
-            None
-        };
-        let world_grid_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("World Grid Pipeline"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &world_grid_shader,
-                entry_point: "vs_main",
-                buffers: &[WorldGridRaw::desc()],
-                compilation_options: PipelineCompilationOptions::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &world_grid_shader,
-                entry_point: "fs_main",
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: config.format,
-                    blend: Some(wgpu::BlendState {
-                        color: wgpu::BlendComponent {
-                            src_factor: wgpu::BlendFactor::SrcAlpha,
-                            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
-                            operation: wgpu::BlendOperation::Add,
-                        },
-                        alpha: wgpu::BlendComponent::OVER,
-                    }),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: PipelineCompilationOptions::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList, // Changed from LineList to TriangleList
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: None,
-                polygon_mode: wgpu::PolygonMode::Fill,
-                unclipped_depth: false,
-                conservative: false,
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState {
-                count: 1,
-                mask: !0,
-                alpha_to_coverage_enabled: false,
-            },
-            multiview: None,
-        });
-        let world_grid_pipeline_depth =
-            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("World Grid Depth Pipeline"),
-                layout: Some(&pipeline_layout),
-                vertex: wgpu::VertexState {
-                    module: &world_grid_shader,
-                    entry_point: "vs_main",
-                    buffers: &[WorldGridRaw::desc()],
-                    compilation_options: PipelineCompilationOptions::default(),
-                },
-                fragment: Some(wgpu::FragmentState {
-                    module: &world_grid_shader,
-                    entry_point: "fs_main",
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format: config.format,
-                        blend: Some(wgpu::BlendState {
-                            color: wgpu::BlendComponent {
-                                src_factor: wgpu::BlendFactor::SrcAlpha,
-                                dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
-                                operation: wgpu::BlendOperation::Add,
-                            },
-                            alpha: wgpu::BlendComponent {
-                                src_factor: wgpu::BlendFactor::Zero,
-                                dst_factor: wgpu::BlendFactor::One,
-                                operation: wgpu::BlendOperation::Add,
-                            },
-                        }),
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                    compilation_options: PipelineCompilationOptions::default(),
-                }),
-                primitive: wgpu::PrimitiveState {
-                    topology: wgpu::PrimitiveTopology::TriangleList,
-                    strip_index_format: None,
-                    front_face: wgpu::FrontFace::Ccw,
-                    cull_mode: None,
-                    polygon_mode: wgpu::PolygonMode::Fill,
-                    unclipped_depth: false,
-                    conservative: false,
-                },
-                depth_stencil: Some(wgpu::DepthStencilState {
-                    format: DEPTH_FORMAT,
-                    depth_write_enabled: true,
-                    depth_compare: wgpu::CompareFunction::Less, // Ensure correct depth test
-                    stencil: wgpu::StencilState::default(),
-                    bias: wgpu::DepthBiasState::default(),
-                }),
-                multisample: wgpu::MultisampleState {
-                    count: 1,
-                    mask: !0,
-                    alpha_to_coverage_enabled: false,
-                },
-                multiview: None,
-            });
-
-        let buffers = AppBuffers {
-            cube_vertex: vertex_buf,
-            cube_index: index_buf,
-            uniform: uniform_buf,
-            instances: instance_buffer,
-            camera: camera_buffer,
-            bounding_box_vertex: bounding_box_vertex_buf,
-            bounding_box_index: bounding_box_index_buf,
-            bounding_box_instance: bounding_box_instance_buffer,
-            world_grid: world_grid_buffer,
-        };
-
-        let pipelines = AppRenderPipelines {
-            main_simulation: pipeline,
-            bounding_box: pipeline_wire,
-            world_grid: world_grid_pipeline,
-            world_grid_overlay: world_grid_pipeline_depth,
-        };
-
+        ) = Camera::setup_camera(config, device);
+        let initial_sort_time = instance_manager.sort_by_distance_to_camera(&camera);
+        let depth_texture = Texture::create_depth_texture(device, config, "depth_texture");
+        let (buffers, cube_num_indices, bounding_box_num_indices) = AppBuffers::new(
+            device,
+            &settings,
+            config,
+            &instance_manager,
+            camera_buffer,
+            &world_grid_vertices,
+        );
+        let shaders = AppShaders::new(device);
+        let render_layouts = AppRenderLayouts::new(device, &camera_bind_group_layout);
+        let pipelines = AppRenderPipelines::new(device, config, &shaders, &render_layouts);
         let text_renderer = TextRenderManager::new(
             device,
             config,
@@ -1032,11 +239,19 @@ impl cellular_automata_3d::framework::App for App {
             &settings.color_method,
         );
 
-        // Done
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout: &render_layouts.bind_group,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: buffers.uniform.as_entire_binding(),
+            }],
+            label: None,
+        });
+
         App {
             bind_group,
             instance_manager,
-            num_indices: index_data.len() as u32,
+            cube_num_indices,
             camera,
             last_sort_camera: camera,
             projection,
@@ -1047,15 +262,16 @@ impl cellular_automata_3d::framework::App for App {
             settings,
             depth_texture,
             update_queue: UpdateQueue::default(),
-            bounding_box_num_indices: bounding_box_index_data.len() as u32,
+            bounding_box_num_indices,
             world_grid_vertices,
             buffers,
             pipelines,
             text_renderer,
-            last_sort_time: sort_time,
+            last_sort_time: initial_sort_time,
             simulation_state: SimulationState::Paused,
             last_simulation_time: Duration::default(),
             last_cpu_time: Duration::default(),
+            last_user_input_instant: Instant::now(),
         }
     }
 
@@ -1067,9 +283,18 @@ impl cellular_automata_3d::framework::App for App {
                 },
                 ..
             } => {
+                if self.last_user_input_instant.elapsed().as_millis()
+                    < MIN_USER_INPUT_INTERVAL.into()
+                {
+                    log::debug!(
+                        "User input too frequent. Ignoring {:?}, took: {:?},",
+                        logical_key,
+                        self.last_user_input_instant.elapsed(),
+                    );
+                    return;
+                }
                 self.camera_controller
                     .process_keyboard(logical_key.clone(), state);
-                // TODO: Limit how fast a user can spam the keys to avoid trying to access for e.g. self.instances before increase_num_instances has finished
                 if state == ElementState::Pressed {
                     if let Key::Character(s) = logical_key {
                         if s.as_str() == "p" {
@@ -1211,6 +436,7 @@ impl cellular_automata_3d::framework::App for App {
                         }
                     }
                 }
+                self.last_user_input_instant = Instant::now();
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 self.camera_controller.process_scroll(&delta);
@@ -1256,6 +482,7 @@ impl cellular_automata_3d::framework::App for App {
             self.last_sort_time,
             self.simulation_state.clone(),
             self.settings.simulation_tick_rate,
+            &self.settings.simulation_rules,
         );
     }
 
@@ -1265,7 +492,7 @@ impl cellular_automata_3d::framework::App for App {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
     ) {
-        let mx_total = Self::generate_matrix(config.width as f32 / config.height as f32);
+        let mx_total = generate_matrix(config.width as f32 / config.height as f32);
         let mx_ref: &[f32; 16] = mx_total.as_ref();
         self.projection.resize(config.width, config.height);
         self.depth_texture =
@@ -1304,11 +531,11 @@ impl cellular_automata_3d::framework::App for App {
             render_pass.set_bind_group(0, &self.bind_group, &[]);
             render_pass.set_bind_group(1, &self.camera_bind_group, &[]);
             render_pass.set_vertex_buffer(0, self.buffers.cube_vertex.slice(..));
-            render_pass.set_vertex_buffer(1, self.buffers.instances.slice(..));
+            render_pass.set_vertex_buffer(1, self.buffers.simulation_instances.slice(..));
             render_pass
                 .set_index_buffer(self.buffers.cube_index.slice(..), wgpu::IndexFormat::Uint16);
             render_pass.draw_indexed(
-                0..self.num_indices,
+                0..self.cube_num_indices,
                 0,
                 0..self.instance_manager.num_flattened_instances() as _,
             );
