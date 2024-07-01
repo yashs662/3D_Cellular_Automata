@@ -52,6 +52,13 @@ impl NeighborMethod {
             NeighborMethod::Moore => 26,
         }
     }
+
+    fn user_friendly_string(&self) -> &str {
+        match self {
+            NeighborMethod::VonNeumann => "Von Neumann",
+            NeighborMethod::Moore => "Moore",
+        }
+    }
 }
 
 pub static VON_NEUMANN_NEIGHBORS: [(i32, i32, i32); 6] = [
@@ -639,18 +646,18 @@ impl SimulationRules {
 
         format!(
             "\nSurvival: {}\nBirth: {}\nNum States: {}\nNeighbor Method: {}",
-            survival, birth, num_states, neighbor_method
+            survival, birth, num_states, neighbor_method.user_friendly_string()
         )
     }
 
-    fn compress_continuous_numbers(numbers: &[u8]) -> String {
+    pub fn compress_continuous_numbers(numbers: &[u8]) -> String {
         let mut compressed_numbers = String::new();
         if numbers.is_empty() {
             return compressed_numbers;
         }
-        let mut start = numbers[0] as usize;
-        let mut end = numbers[0] as usize;
-        for number in 1..numbers.len() {
+        let mut start = numbers[0];
+        let mut end = numbers[0];
+        for &number in &numbers[1..] {
             if number == end + 1 {
                 end = number;
             } else {
@@ -668,7 +675,7 @@ impl SimulationRules {
         } else {
             compressed_numbers.push_str(&format!("{}-{}", start, end));
         }
-        compressed_numbers
+        compressed_numbers.trim_end_matches(',').to_string()
     }
 
     pub fn parse_rules(rules: Option<&str>) -> SimulationRules {

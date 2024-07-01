@@ -346,3 +346,29 @@ mod color_method_parse_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod compress_numbers_tests {
+    use crate::simulation::SimulationRules;
+
+    #[test]
+    fn no_compression() {
+        let test = [2, 6, 9];
+        let correct = "2,6,9".to_string();
+        assert_eq!(SimulationRules::compress_continuous_numbers(&test), correct);
+    }
+
+    #[test]
+    fn single_compression() {
+        let test = [2, 3, 4, 5, 6, 7, 8, 9];
+        let correct = "2-9".to_string();
+        assert_eq!(SimulationRules::compress_continuous_numbers(&test), correct);
+    }
+
+    #[test]
+    fn complex_compression() {
+        let test = [4, 6, 8, 9, 10, 11, 12, 13, 14, 20, 23, 24, 25];
+        let correct = "4,6,8-14,20,23-25".to_string();
+        assert_eq!(SimulationRules::compress_continuous_numbers(&test), correct);
+    }
+}
