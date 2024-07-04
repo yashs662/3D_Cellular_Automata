@@ -7,9 +7,9 @@ use cellular_automata_3d::{
         MIN_USER_INPUT_INTERVAL, SPACE_BETWEEN_INSTANCES_STEP_SIZE,
         TRANSLATION_THRESHOLD_FOR_SORTING, TRANSPARENCY_STEP_SIZE, WORLD_GRID_SIZE_MULTIPLIER,
     },
-    framework::Settings,
     graphics::{AppBuffers, AppRenderLayouts, AppRenderPipelines, AppShaders},
     instance::{Instance, InstanceManager, WorldGridRaw},
+    settings::{InputKey, Settings},
     simulation::SimulationState,
     text_renderer::TextRenderManager,
     texture::{self, Texture},
@@ -20,10 +20,7 @@ use cgmath::InnerSpace;
 use clap::Parser;
 use std::time::{Duration, Instant};
 use wgpu::util::DeviceExt;
-use winit::{
-    event::{DeviceEvent, ElementState, KeyEvent, MouseButton, WindowEvent},
-    keyboard::{Key, NamedKey},
-};
+use winit::event::{DeviceEvent, ElementState, KeyEvent, MouseButton, WindowEvent};
 
 struct App {
     bind_group: wgpu::BindGroup,
@@ -283,101 +280,88 @@ impl cellular_automata_3d::framework::App for App {
                 },
                 ..
             } => {
-                if self.last_user_input_instant.elapsed().as_millis()
+                let input_key = InputKey::from(logical_key);
+                if input_key.is_movement_key() {
+                    self.camera_controller.process_keyboard(input_key, state);
+                } else if self.last_user_input_instant.elapsed().as_millis()
                     < MIN_USER_INPUT_INTERVAL.into()
                 {
                     log::debug!(
                         "User input too frequent. Ignoring {:?}, took: {:?},",
-                        logical_key,
+                        input_key,
                         self.last_user_input_instant.elapsed(),
                     );
                     return;
                 }
-                self.camera_controller
-                    .process_keyboard(logical_key.clone(), state);
-                if state == ElementState::Pressed {
-                    if let Key::Character(s) = logical_key {
-                        if s.as_str() == "p" {
+                if input_key.requires_paused_simulation() && self.simulation_state.is_active() {
+                    log::warn!("Cannot alter this setting when simulation is active, please pause the simulation first.");
+                    return;
+                }
+                if state.is_pressed() {
+                    match input_key {
+                        InputKey::ToggleBoundingBox => {
                             self.settings.toggle_bounding_box();
-                        } else if s.as_str() == "n" {
-                            if self.simulation_state == SimulationState::Active {
-                                log::warn!("Cannot alter transparency when simulation is active");
-                            } else {
-                                self.settings.set_transparency(
-                                    self.settings.transparency - TRANSPARENCY_STEP_SIZE,
-                                    &mut self.update_queue,
-                                );
+                        }
+                        InputKey::DecreaseTransparency => {
+                            self.settings.set_transparency(
+                                self.settings.transparency - TRANSPARENCY_STEP_SIZE,
+                                &mut self.update_queue,
+                            );
+                        }
+                        InputKey::IncreaseTransparency => {
+                            self.settings.set_transparency(
+                                self.settings.transparency + TRANSPARENCY_STEP_SIZE,
+                                &mut self.update_queue,
+                            );
+                        }
+                        InputKey::DecreaseSpaceBetweenInstances => {
+                            self.settings.set_space_between_instances(
+                                self.settings.space_between_instances
+                                    - SPACE_BETWEEN_INSTANCES_STEP_SIZE,
+                                &mut self.update_queue,
+                            );
+                        }
+                        InputKey::IncreaseSpaceBetweenInstances => {
+                            self.settings.set_space_between_instances(
+                                self.settings.space_between_instances
+                                    + SPACE_BETWEEN_INSTANCES_STEP_SIZE,
+                                &mut self.update_queue,
+                            );
+                        }
+                        InputKey::ToggleSimulationState => match self.simulation_state {
+                            SimulationState::Active => {
+                                self.simulation_state = SimulationState::Paused;
+                                log::info!("Simulation paused");
                             }
-                        } else if s.as_str() == "m" {
-                            if self.simulation_state == SimulationState::Active {
-                                log::warn!("Cannot alter transparency when simulation is active");
-                            } else {
-                                self.settings.set_transparency(
-                                    self.settings.transparency + TRANSPARENCY_STEP_SIZE,
-                                    &mut self.update_queue,
-                                );
+                            SimulationState::Paused => {
+                                self.simulation_state = SimulationState::Active;
+                                log::info!("Simulation active");
                             }
-                        } else if s.as_str() == "k" {
-                            if self.simulation_state == SimulationState::Active {
-                                log::warn!("Cannot alter space between instances when simulation is active");
-                            } else {
-                                self.settings.set_space_between_instances(
-                                    self.settings.space_between_instances
-                                        - SPACE_BETWEEN_INSTANCES_STEP_SIZE,
-                                    &mut self.update_queue,
-                                );
-                            }
-                        } else if s.as_str() == "l" {
-                            if self.simulation_state == SimulationState::Active {
-                                log::warn!("Cannot alter space between instances when simulation is active");
-                            } else {
-                                self.settings.set_space_between_instances(
-                                    self.settings.space_between_instances
-                                        + SPACE_BETWEEN_INSTANCES_STEP_SIZE,
-                                    &mut self.update_queue,
-                                );
-                            }
-                        } else if s.as_str() == "o" {
-                            match self.simulation_state {
-                                SimulationState::Active => {
-                                    self.simulation_state = SimulationState::Paused;
-                                    log::info!("Simulation paused");
-                                }
-                                SimulationState::Paused => {
-                                    self.simulation_state = SimulationState::Active;
-                                    log::info!("Simulation active");
-                                }
-                                SimulationState::Stable => {
-                                    log::warn!(
+                            SimulationState::Stable => {
+                                log::warn!(
                                         "Simulation has reached a stable state. Cannot be resumed. Nothing to simulate."
                                     )
-                                }
                             }
-                        } else if s.as_str() == "i" {
+                        },
+                        InputKey::ToggleWorldGrid => {
                             self.settings.toggle_world_grid();
-                        } else if s.as_str() == "u" {
+                        }
+                        InputKey::ToggleSimulationMode => {
                             self.settings.next_simulation_mode();
                         }
-                    } else if let Key::Named(key) = logical_key {
-                        if key == NamedKey::PageUp {
-                            if self.simulation_state == SimulationState::Active {
-                                log::warn!("Cannot alter domain size when simulation is active");
-                            } else {
-                                self.settings.set_domain_size(
-                                    self.settings.domain_size + DOMAIN_SIZE_STEP_SIZE,
-                                    &mut self.update_queue,
-                                );
-                            }
-                        } else if key == NamedKey::PageDown {
-                            if self.simulation_state == SimulationState::Active {
-                                log::warn!("Cannot alter domain size when simulation is active");
-                            } else {
-                                self.settings.set_domain_size(
-                                    self.settings.domain_size - DOMAIN_SIZE_STEP_SIZE,
-                                    &mut self.update_queue,
-                                );
-                            }
-                        } else if key == NamedKey::Home {
+                        InputKey::IncreaseDomainSize => {
+                            self.settings.set_domain_size(
+                                self.settings.domain_size + DOMAIN_SIZE_STEP_SIZE,
+                                &mut self.update_queue,
+                            );
+                        }
+                        InputKey::DecreaseDomainSize => {
+                            self.settings.set_domain_size(
+                                self.settings.domain_size - DOMAIN_SIZE_STEP_SIZE,
+                                &mut self.update_queue,
+                            );
+                        }
+                        InputKey::IncreaseFontSize => {
                             let current_font_size = self.text_renderer.font_metrics.font_size;
                             if current_font_size < MAX_FONT_SIZE {
                                 let new_font_size = current_font_size + FONT_SIZE_STEP_SIZE;
@@ -386,7 +370,8 @@ impl cellular_automata_3d::framework::App for App {
                             } else {
                                 log::warn!("Font size is already at maximum: {}", MAX_FONT_SIZE);
                             }
-                        } else if key == NamedKey::End {
+                        }
+                        InputKey::DecreaseFontSize => {
                             let current_font_size = self.text_renderer.font_metrics.font_size;
                             if current_font_size > MIN_FONT_SIZE {
                                 let new_font_size = current_font_size - FONT_SIZE_STEP_SIZE;
@@ -395,7 +380,8 @@ impl cellular_automata_3d::framework::App for App {
                             } else {
                                 log::warn!("Font size is already at minimum: {}", MIN_FONT_SIZE);
                             }
-                        } else if key == NamedKey::Insert {
+                        }
+                        InputKey::IncreaseLineHeightMultiplier => {
                             if self.text_renderer.line_height_multiplier
                                 < MAX_LINE_HEIGHT_MULTIPLIER
                             {
@@ -414,7 +400,8 @@ impl cellular_automata_3d::framework::App for App {
                                     MAX_LINE_HEIGHT_MULTIPLIER
                                 );
                             }
-                        } else if key == NamedKey::Delete {
+                        }
+                        InputKey::DecreaseLineHeightMultiplier => {
                             if self.text_renderer.line_height_multiplier
                                 > MIN_LINE_HEIGHT_MULTIPLIER
                             {
@@ -434,6 +421,14 @@ impl cellular_automata_3d::framework::App for App {
                                 );
                             }
                         }
+                        InputKey::MoveForward
+                        | InputKey::MoveLeft
+                        | InputKey::MoveBackward
+                        | InputKey::MoveRight
+                        | InputKey::MoveUp
+                        | InputKey::MoveDown
+                        | InputKey::Unknown
+                        | InputKey::ToggleVsync => {}
                     }
                 }
                 self.last_user_input_instant = Instant::now();

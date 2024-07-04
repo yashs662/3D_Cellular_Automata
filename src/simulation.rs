@@ -9,6 +9,15 @@ pub enum SimulationState {
     Stable,
 }
 
+impl SimulationState {
+    pub fn is_active(&self) -> bool {
+        match self {
+            SimulationState::Active => true,
+            _ => false,
+        }
+    }
+}
+
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum NeighborMethod {
     /// 26 neighbors
@@ -646,7 +655,10 @@ impl SimulationRules {
 
         format!(
             "\nSurvival: {}\nBirth: {}\nNum States: {}\nNeighbor Method: {}",
-            survival, birth, num_states, neighbor_method.user_friendly_string()
+            survival,
+            birth,
+            num_states,
+            neighbor_method.user_friendly_string()
         )
     }
 

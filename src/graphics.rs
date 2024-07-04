@@ -2,8 +2,8 @@ use crate::{
     constants::{
         DEPTH_FORMAT, FRAGMENT_SHADER_ENTRY_POINT, MAX_DOMAIN_SIZE, VERTEX_SHADER_ENTRY_POINT,
     },
-    framework::Settings,
     instance::{Instance, InstanceManager, InstanceRaw, WorldGridRaw},
+    settings::Settings,
     utils::generate_matrix,
     vertex::Vertex,
 };

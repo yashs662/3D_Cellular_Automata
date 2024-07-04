@@ -1,6 +1,6 @@
 use crate::{
     camera::Camera,
-    framework::Settings,
+    settings::Settings,
     simulation::{CellState, CellStateEnum, ColorMethod, SimulationState},
     utils::{Color, UpdateEnum, UpdateQueue},
     vertex::Vertex,

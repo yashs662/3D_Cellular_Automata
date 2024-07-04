@@ -1,14 +1,13 @@
 use bytemuck::{Pod, Zeroable};
 use cgmath::{perspective, InnerSpace, Matrix4, Point3, Rad, SquareMatrix, Vector3};
 use wgpu::util::DeviceExt;
-use winit::{
-    dpi::PhysicalPosition,
-    event::{ElementState, MouseScrollDelta},
-    keyboard::{Key, NamedKey},
-};
+use winit::{dpi::PhysicalPosition, event::{ElementState, MouseScrollDelta}};
 
-use crate::constants::{
-    DEFAULT_CAMERA_SENSITIVITY, DEFAULT_CAMERA_SPEED, OPENGL_TO_WGPU_MATRIX, SAFE_FRAC_PI_2,
+use crate::{
+    constants::{
+        DEFAULT_CAMERA_SENSITIVITY, DEFAULT_CAMERA_SPEED, OPENGL_TO_WGPU_MATRIX, SAFE_FRAC_PI_2,
+    },
+    settings::InputKey,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -161,53 +160,34 @@ impl CameraController {
         }
     }
 
-    pub fn process_keyboard(&mut self, logical_key: Key, state: ElementState) -> bool {
+    pub fn process_keyboard(&mut self, input_kay: InputKey, state: ElementState) -> bool {
         let amount = if state == ElementState::Pressed {
             1.0
         } else {
             0.0
         };
-        match logical_key {
-            Key::Character(s) => match s.as_str() {
-                "w" => {
-                    self.amount_forward = amount;
-                    true
-                }
-                "a" => {
-                    self.amount_left = amount;
-                    true
-                }
-                "s" => {
-                    self.amount_backward = amount;
-                    true
-                }
-                "d" => {
-                    self.amount_right = amount;
-                    true
-                }
-                _ => false,
-            },
-            Key::Named(NamedKey::ArrowUp) => {
+        match input_kay {
+            InputKey::MoveForward => {
                 self.amount_forward = amount;
                 true
             }
-            Key::Named(NamedKey::ArrowLeft) => {
+            InputKey::MoveLeft => {
                 self.amount_left = amount;
                 true
             }
-            Key::Named(NamedKey::ArrowDown) => {
+            InputKey::MoveBackward => {
                 self.amount_backward = amount;
                 true
             }
-            Key::Named(NamedKey::ArrowRight) => {
+            InputKey::MoveRight => {
                 self.amount_right = amount;
                 true
             }
-            Key::Named(NamedKey::Space) => {
+            InputKey::MoveUp => {
                 self.amount_up = amount;
                 true
             }
-            Key::Named(NamedKey::Shift) => {
+            InputKey::MoveDown => {
                 self.amount_down = amount;
                 true
             }
