@@ -1,6 +1,8 @@
+// Implementation based on wgpu examples <https://github.com/gfx-rs/wgpu/tree/trunk/examples>
+
 use crate::{constants::FRAME_COUNTER_UPDATE_INTERVAL, utils::CommandLineArgs};
 use std::{sync::Arc, time::Instant};
-use wgpu::Surface;
+use wgpu::{Instance, Surface};
 use winit::{
     dpi::PhysicalSize,
     event::{DeviceEvent, Event, KeyEvent, StartCause, WindowEvent},
@@ -92,6 +94,19 @@ impl SurfaceWrapper {
         }
     }
 
+    /// Called after the instance is created, but before we request an adapter.
+    ///
+    /// On wasm, we need to create the surface here, as the WebGL backend needs
+    /// a surface (and hence a canvas) to be present to create the adapter.
+    ///
+    /// We cannot unconditionally create a surface here, as Android requires
+    /// us to wait until we receive the `Resumed` event to do so.
+    fn pre_adapter(&mut self, instance: &Instance, window: Arc<Window>) {
+        if cfg!(target_arch = "wasm32") {
+            self.surface = Some(instance.create_surface(window).unwrap());
+        }
+    }
+
     /// Called when an event which matches [`Self::start_condition`] is received.
     ///
     /// On all native platforms, this is where we create the surface.
@@ -103,11 +118,12 @@ impl SurfaceWrapper {
         let width = window_size.width.max(1);
         let height = window_size.height.max(1);
 
-        log::debug!("Surface resume {window_size:?}");
+        log::info!("Surface resume {window_size:?}");
 
         // We didn't create the surface in pre_adapter, so we need to do so now.
-
-        self.surface = Some(context.instance.create_surface(window).unwrap());
+        if !cfg!(target_arch = "wasm32") {
+            self.surface = Some(context.instance.create_surface(window).unwrap());
+        }
 
         // From here on, self.surface should be Some.
 
@@ -134,7 +150,7 @@ impl SurfaceWrapper {
 
     /// Resize the surface, making sure to not resize to zero.
     fn resize(&mut self, context: &AppContext, size: PhysicalSize<u32>) {
-        log::debug!("Surface resize {size:?}");
+        log::info!("Surface resize {size:?}");
 
         let config = self.config.as_mut().unwrap();
         config.width = size.width.max(1);
@@ -202,8 +218,8 @@ struct AppContext {
 }
 impl AppContext {
     /// Initializes the app context.
-    async fn init_async<E: App>(surface: &mut SurfaceWrapper, _window: Arc<Window>) -> Self {
-        log::debug!("Initializing wgpu...");
+    async fn init_async<E: App>(surface: &mut SurfaceWrapper, window: Arc<Window>) -> Self {
+        log::info!("Initializing wgpu...");
 
         let backends = wgpu::util::backend_bits_from_env().unwrap_or_default();
         let dx12_shader_compiler = wgpu::util::dx12_shader_compiler_from_env().unwrap_or_default();
@@ -215,19 +231,20 @@ impl AppContext {
             dx12_shader_compiler,
             gles_minor_version,
         });
+        surface.pre_adapter(&instance, window);
         let adapter = wgpu::util::initialize_adapter_from_env_or_default(&instance, surface.get())
             .await
             .expect("No suitable GPU adapters found on the system!");
 
         let adapter_info = adapter.get_info();
-        log::debug!("Using {} ({:?})", adapter_info.name, adapter_info.backend);
+        log::info!("Using {} ({:?})", adapter_info.name, adapter_info.backend);
 
         let optional_features = E::optional_features();
         let required_features = E::required_features();
         let adapter_features = adapter.features();
         assert!(
             adapter_features.contains(required_features),
-            "Adapter does not support required features for this app: {:?}",
+            "Adapter does not support required features for this example: {:?}",
             required_features - adapter_features
         );
 
@@ -235,14 +252,14 @@ impl AppContext {
         let downlevel_capabilities = adapter.get_downlevel_capabilities();
         assert!(
             downlevel_capabilities.shader_model >= required_downlevel_capabilities.shader_model,
-            "Adapter does not support the minimum shader model required to run this app: {:?}",
+            "Adapter does not support the minimum shader model required to run this example: {:?}",
             required_downlevel_capabilities.shader_model
         );
         assert!(
             downlevel_capabilities
                 .flags
                 .contains(required_downlevel_capabilities.flags),
-            "Adapter does not support the downlevel capabilities required to run this app: {:?}",
+            "Adapter does not support the downlevel capabilities required to run this example: {:?}",
             required_downlevel_capabilities.flags - downlevel_capabilities.flags
         );
 
@@ -256,6 +273,7 @@ impl AppContext {
                     label: None,
                     required_features: (optional_features & adapter_features) | required_features,
                     required_limits: needed_limits,
+                    memory_hints: wgpu::MemoryHints::MemoryUsage,
                 },
                 trace_dir.ok().as_ref().map(std::path::Path::new),
             )

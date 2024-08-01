@@ -231,6 +231,7 @@ impl AppRenderPipelines {
             // If the pipeline will be used with a multiview render pass, this
             // indicates how many array layers the attachments will have.
             multiview: None,
+            cache: None,
         });
 
         let pipeline_wire = if device
@@ -272,6 +273,7 @@ impl AppRenderPipelines {
                 depth_stencil: None,
                 multisample: wgpu::MultisampleState::default(),
                 multiview: None,
+                cache: None,
             });
             Some(pipeline_wire)
         } else {
@@ -320,6 +322,7 @@ impl AppRenderPipelines {
                 alpha_to_coverage_enabled: false,
             },
             multiview: None,
+            cache: None,
         });
 
         let world_grid_pipeline_depth =
@@ -375,6 +378,7 @@ impl AppRenderPipelines {
                     alpha_to_coverage_enabled: false,
                 },
                 multiview: None,
+                cache: None,
             });
 
         Self {

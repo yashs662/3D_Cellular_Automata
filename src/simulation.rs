@@ -11,10 +11,7 @@ pub enum SimulationState {
 
 impl SimulationState {
     pub fn is_active(&self) -> bool {
-        match self {
-            SimulationState::Active => true,
-            _ => false,
-        }
+        matches!(self, SimulationState::Active)
     }
 }
 

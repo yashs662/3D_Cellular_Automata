@@ -209,27 +209,27 @@ pub enum InputKey {
 
 impl InputKey {
     pub fn is_movement_key(&self) -> bool {
-        match self {
+        matches!(
+            self,
             InputKey::MoveForward
-            | InputKey::MoveLeft
-            | InputKey::MoveBackward
-            | InputKey::MoveRight
-            | InputKey::MoveUp
-            | InputKey::MoveDown => true,
-            _ => false,
-        }
+                | InputKey::MoveLeft
+                | InputKey::MoveBackward
+                | InputKey::MoveRight
+                | InputKey::MoveUp
+                | InputKey::MoveDown
+        )
     }
 
     pub fn requires_paused_simulation(&self) -> bool {
-        match self {
-            | InputKey::IncreaseTransparency
-            | InputKey::DecreaseTransparency
-            | InputKey::IncreaseSpaceBetweenInstances
-            | InputKey::DecreaseSpaceBetweenInstances
-            | InputKey::IncreaseDomainSize
-            | InputKey::DecreaseDomainSize => true,
-            _ => false,
-        }
+        matches!(
+            self,
+            InputKey::IncreaseTransparency
+                | InputKey::DecreaseTransparency
+                | InputKey::IncreaseSpaceBetweenInstances
+                | InputKey::DecreaseSpaceBetweenInstances
+                | InputKey::IncreaseDomainSize
+                | InputKey::DecreaseDomainSize
+        )
     }
 }
 

@@ -1,6 +1,6 @@
 [package]
 name = "cellular_automata_3d"
-version = "0.5.2"
+version = "0.5.3"
 edition = "2021"
 authors = ["Yash Sharma <yashs662@gmail.com>"]
 description = "A 3D cellular automata simulation using wgpu"
@@ -9,21 +9,21 @@ repository = "https://github.com/yashs662/3D_Cellular_Automata"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-wgpu = "0.20.1"
+wgpu = "22.1.0"
 winit = "0.29.15"
-env_logger = "0.11.3"
+env_logger = "0.11.5"
 log = "0.4.22"
 rand = "0.8.5"
 pollster = "0.3.0"
-bytemuck = "1.16.1"
+bytemuck = "1.16.3"
 glam = "0.28.0"
 cgmath = "0.18.0"
 rayon = { version = "1.10.0", optional = true }
-clap = { version = "4.5.8", features = ["derive"] }
+clap = { version = "4.5.13", features = ["derive"] }
 palette = "0.7.6"
 strum = { version = "0.26.3", features = ["derive"] }
 colored = "2.1.0"
-glyphon = { git="https://github.com/grovesNL/glyphon.git" , rev = "2a45708"}
+glyphon = { git="https://github.com/grovesNL/glyphon.git" , rev = "ce6ede9"}
 chrono = "0.4.38"
 
 [features]

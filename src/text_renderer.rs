@@ -109,7 +109,7 @@ impl TextRenderBuffers {
         default_text: &str,
     ) -> glyphon::Buffer {
         let mut buffer = glyphon::Buffer::new(font_system, font_metrics);
-        buffer.set_size(font_system, physical_width, physical_height);
+        buffer.set_size(font_system, Some(physical_width), Some(physical_height));
         buffer.set_text(
             font_system,
             default_text,
